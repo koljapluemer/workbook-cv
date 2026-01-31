@@ -6,7 +6,9 @@ from typing import Generator
 
 from ..storage import VersionManager
 from ..processing import CleanupPipeline, detect_bounding_boxes
+from ..export import export_coco, export_yolo
 from .components import render_navigation, render_version_dropdown
+from .annotation import render_drawing_canvas, extract_boxes_from_canvas, render_annotated_image
 
 
 @contextmanager
@@ -208,10 +210,79 @@ def run_app():
                 st.success(f"Created {version.display_name} ({len(boxes)} boxes)")
                 st.rerun()
 
+        # Draw Annotations section (available for any version)
+        st.divider()
+        st.subheader("Draw Annotations")
+        st.caption("Draw rectangles on the image in the main area, then save.")
+
+        if st.button("Save Annotations", use_container_width=True):
+            # Get canvas data from session state
+            canvas_data = st.session_state.get("canvas_data")
+            if canvas_data:
+                scale = canvas_data.get("scale", 1.0)
+                boxes = extract_boxes_from_canvas(canvas_data, scale)
+
+                if boxes:
+                    # Get source image
+                    if selected_version == "original":
+                        source_image = version_manager.load_original(current_file)
+                    else:
+                        source = version_manager.get_version(current_file, selected_version)
+                        source_image = source.image
+
+                    # Create annotated image with boxes drawn
+                    annotated_image = render_annotated_image(source_image, boxes)
+
+                    # Save annotation version
+                    annotation_version = version_manager.create_version(
+                        original=current_file,
+                        type="annotation",
+                        source=selected_version,
+                        image=annotated_image,
+                        params={"source_version": selected_version},
+                        data={
+                            "boxes": boxes,
+                            "selected_boxes": boxes,
+                            "category": "unit",
+                        },
+                    )
+
+                    st.session_state.selected_version = annotation_version.id
+                    st.success(f"Created {annotation_version.display_name} ({len(boxes)} boxes)")
+                    st.rerun()
+                else:
+                    st.warning("No rectangles drawn. Draw some rectangles first.")
+            else:
+                st.warning("No canvas data available.")
+
+        # Export Annotations section
+        st.divider()
+        st.subheader("Export Annotations")
+
+        # Count annotated images
+        annotated_images = []
+        for img_file in image_files:
+            img_versions = version_manager.list_versions(img_file)
+            for v in img_versions:
+                if v.type == "annotation":
+                    annotated_images.append((img_file, v.id))
+                    break  # Only count first annotation per image
+
+        st.caption(f"{len(annotated_images)} images with annotations")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Export COCO", use_container_width=True, disabled=len(annotated_images) == 0):
+                _export_coco_annotations(version_manager, annotated_images, processed_dir)
+        with col2:
+            if st.button("Export YOLO", use_container_width=True, disabled=len(annotated_images) == 0):
+                _export_yolo_annotations(version_manager, annotated_images, processed_dir)
+
     # Load and display selected version
     if selected_version == "original":
         display_image = version_manager.load_original(current_file)
-        st.info("Showing original image")
+        st.info("Showing original image - Draw rectangles below to annotate")
+        existing_boxes = None
     else:
         version = version_manager.get_version(current_file, selected_version)
         display_image = version.image
@@ -221,6 +292,102 @@ def run_app():
         if version.type == "bbox":
             box_count = len(version.data.get("boxes", []))
             info_text += f" - {box_count} boxes detected"
+        elif version.type == "annotation":
+            selected_count = len(version.data.get("selected_boxes", []))
+            info_text += f" - {selected_count} boxes annotated"
+        info_text += " - Draw rectangles below to annotate"
         st.info(info_text)
 
-    st.image(display_image, use_container_width=True)
+        # Get existing boxes from annotation versions to display
+        existing_boxes = None
+        if version.type == "annotation":
+            existing_boxes = version.data.get("selected_boxes", [])
+
+    # Render drawable canvas instead of static image
+    canvas_key = f"canvas_{current_file.stem}_{selected_version}"
+    canvas_data = render_drawing_canvas(display_image, existing_boxes, canvas_key)
+    st.session_state["canvas_data"] = canvas_data
+
+    # Show box count from canvas
+    if canvas_data:
+        scale = canvas_data.get("scale", 1.0)
+        drawn_boxes = extract_boxes_from_canvas(canvas_data, scale)
+        if drawn_boxes:
+            st.caption(f"{len(drawn_boxes)} rectangle(s) drawn")
+
+
+def _export_coco_annotations(
+    version_manager: VersionManager,
+    annotated_images: list[tuple[Path, str]],
+    processed_dir: Path,
+) -> None:
+    """Export all annotations in COCO JSON format."""
+    images_data = []
+
+    for img_file, version_id in annotated_images:
+        version = version_manager.get_version(img_file, version_id)
+        selected_boxes = version.data.get("selected_boxes", [])
+
+        if not selected_boxes:
+            continue
+
+        img_height, img_width = version.image.shape[:2]
+
+        annotations = []
+        for box in selected_boxes:
+            # COCO format: [x, y, width, height]
+            annotations.append({
+                "bbox": [box["x"], box["y"], box["w"], box["h"]],
+                "category_id": 1,  # "unit" category
+            })
+
+        images_data.append({
+            "file_name": img_file.name,
+            "width": img_width,
+            "height": img_height,
+            "annotations": annotations,
+        })
+
+    categories = [{"id": 1, "name": "unit"}]
+    output_path = processed_dir / "exports" / "annotations.json"
+
+    export_coco(images_data, categories, output_path)
+    st.success(f"Exported COCO annotations to {output_path}")
+
+
+def _export_yolo_annotations(
+    version_manager: VersionManager,
+    annotated_images: list[tuple[Path, str]],
+    processed_dir: Path,
+) -> None:
+    """Export all annotations in YOLO format."""
+    images_data = []
+
+    for img_file, version_id in annotated_images:
+        version = version_manager.get_version(img_file, version_id)
+        selected_boxes = version.data.get("selected_boxes", [])
+
+        if not selected_boxes:
+            continue
+
+        img_height, img_width = version.image.shape[:2]
+
+        annotations = []
+        for box in selected_boxes:
+            annotations.append({
+                "bbox": [box["x"], box["y"], box["w"], box["h"]],
+                "category_id": 1,  # "unit" category
+            })
+
+        images_data.append({
+            "file_name": img_file.name,
+            "width": img_width,
+            "height": img_height,
+            "annotations": annotations,
+        })
+
+    categories = [{"id": 1, "name": "unit"}]
+    output_dir = processed_dir / "exports" / "yolo"
+
+    export_yolo(images_data, categories, output_dir)
+    st.success(f"Exported YOLO annotations to {output_dir}")

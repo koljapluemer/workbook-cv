@@ -70,6 +70,11 @@ class VersionManager:
                 existing = self.list_versions(original)
                 bbox_count = sum(1 for v in existing if v.type == "bbox") + 1
                 display_name = f"Bounding Boxes #{bbox_count}"
+            elif type == "annotation":
+                # Count existing annotation versions
+                existing = self.list_versions(original)
+                ann_count = sum(1 for v in existing if v.type == "annotation") + 1
+                display_name = f"Annotation #{ann_count}"
             else:
                 display_name = f"{type.title()} {version_id}"
 
