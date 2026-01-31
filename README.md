@@ -30,6 +30,7 @@ streamlit run app.py
 2. Run the app and browse images with prev/next navigation
 3. Use the sidebar to:
    - **Auto-detected boxes**: Toggle red boxes with adjustable sensitivity
+   - **OCR overlay**: Toggle yellow text boxes with adjustable confidence
    - **Draw Annotations**: Manually draw bounding boxes on images
 4. Annotations are saved and accessible per image
 

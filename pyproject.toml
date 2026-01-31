@@ -12,4 +12,5 @@ dependencies = [
     "streamlit-drawable-canvas>=0.9.0",
     "setuptools",
     "ultralytics>=8.4.9",
+    "pytesseract>=0.3.10",
 ]

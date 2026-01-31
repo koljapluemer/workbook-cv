@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from typing import Generator
 
 from PIL import Image
+import cv2
 from ..processing import detect_bounding_boxes
+from ..processing.ocr import detect_ocr
 from ..export.yolo_dataset import build_yolo_dataset
 from ..export.yolo_auto import train_yolo_model, auto_annotate_test_images
 from .components import render_navigation
@@ -103,6 +105,24 @@ def _render_dataset_view(
             )
 
             st.divider()
+            st.subheader("OCR overlay")
+            ocr_toggle_key = f"ocr_toggle_{dataset.id}"
+            ocr_conf_key = f"ocr_conf_{dataset.id}"
+            show_ocr = st.toggle(
+                "Show OCR text boxes",
+                value=st.session_state.get(ocr_toggle_key, False),
+                key=ocr_toggle_key,
+            )
+            ocr_conf = st.slider(
+                "Min confidence",
+                min_value=0,
+                max_value=100,
+                value=st.session_state.get(ocr_conf_key, 60),
+                key=ocr_conf_key,
+                disabled=not show_ocr,
+            )
+
+            st.divider()
             category = render_category_toggle()
 
             # Get source image for thumbnails
@@ -149,6 +169,8 @@ def _render_dataset_view(
         category = "figure"
         show_auto_boxes = False
         sensitivity = 5
+        show_ocr = False
+        ocr_conf = 60
 
     # Load and display image
     original_image = _load_original_image(current_file)
@@ -161,6 +183,12 @@ def _render_dataset_view(
     if not dataset.read_only and show_auto_boxes:
         display_image, auto_boxes = detect_bounding_boxes(original_image, sensitivity)
         st.caption(f"Auto-detected {len(auto_boxes)} boxes")
+
+    if show_ocr:
+        ocr_items = _get_ocr_for_image(dataset.id, current_file.stem, original_image)
+        filtered = [i for i in ocr_items if i.get("conf", -1) >= ocr_conf]
+        display_image = _draw_ocr_overlay(display_image, filtered)
+        st.caption(f"OCR overlay: {len(filtered)} items")
 
     # Render drawable canvas (auto-persists annotations)
     canvas_key = f"canvas_{current_file.stem}"
@@ -207,3 +235,40 @@ def _load_original_image(path: Path) -> np.ndarray:
     """Load an image as RGB numpy array."""
     image = Image.open(path)
     return np.array(image.convert("RGB"))
+
+
+def _get_ocr_for_image(dataset_id: str, image_stem: str, image: np.ndarray) -> list[dict]:
+    cache_key = f"ocr_cache_{dataset_id}_{image_stem}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    try:
+        items = detect_ocr(image)
+    except Exception as exc:
+        st.warning(f"OCR failed: {exc}")
+        items = []
+    st.session_state[cache_key] = items
+    return items
+
+
+def _draw_ocr_overlay(image: np.ndarray, items: list[dict]) -> np.ndarray:
+    overlay = image.copy()
+    color = (255, 215, 0)
+    for item in items:
+        x, y, w, h = item["bbox"]
+        x_i = int(x)
+        y_i = int(y)
+        w_i = int(w)
+        h_i = int(h)
+        cv2.rectangle(overlay, (x_i, y_i), (x_i + w_i, y_i + h_i), color, 2)
+        text = str(item.get("text", ""))[:20]
+        if text:
+            cv2.putText(
+                overlay,
+                text,
+                (x_i + 2, y_i + 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+            )
+    return overlay
