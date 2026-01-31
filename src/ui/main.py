@@ -100,6 +100,14 @@ def run_app():
 
         # Clean Up button
         st.subheader("Clean Up Image")
+
+        # Pipeline step checkboxes
+        do_perspective = st.checkbox("Perspective Correction", value=True)
+        do_deskew = st.checkbox("Deskew", value=True)
+        do_denoise = st.checkbox("Denoise", value=True)
+        do_contrast = st.checkbox("Contrast Enhancement", value=True)
+        do_white_balance = st.checkbox("White Balance", value=False)
+
         if st.button("Run Cleanup Pipeline"):
             steps = ["Loading image", "Running cleanup pipeline", "Saving version"]
             with progress_operation(steps) as update:
@@ -115,7 +123,13 @@ def run_app():
 
                 update(1)
                 # Run cleanup pipeline
-                pipeline = CleanupPipeline()
+                pipeline = CleanupPipeline(
+                    do_perspective=do_perspective,
+                    do_deskew=do_deskew,
+                    do_denoise=do_denoise,
+                    do_contrast=do_contrast,
+                    do_white_balance=do_white_balance,
+                )
                 cleaned_image, metadata = pipeline.run(source_image)
 
                 update(2)
