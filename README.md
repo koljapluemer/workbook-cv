@@ -34,6 +34,14 @@ streamlit run app.py
    - **Draw Annotations**: Manually draw bounding boxes on images
 4. All processed versions are saved and accessible via the version dropdown
 
+### Test Tab (Read-only)
+
+If `img/test-data/` exists and contains images, a **Test** tab appears in the UI.
+
+- Test mode is read-only: no cleanup, detection, or annotation writes
+- Existing annotations from `processed/annotations/` are rendered as overlays
+- Use it to visually inspect model or auto-annotation outputs without modifying data
+
 ## Annotation System
 
 Draw rectangles directly on images to create training data for object detection (YOLO, etc.).
@@ -130,3 +138,49 @@ wordbook-cv/
         ├── components.py       # Reusable UI components
         └── main.py             # Main app layout
 ```
+
+## Model Training (YOLO)
+
+This project already writes YOLO labels to `processed/annotations/{image}.txt` as you annotate.
+To train a YOLO model and auto-annotate test data, use the built-in UI buttons (no manual copying).
+
+### Dependencies
+
+Ultralytics is included in the project dependencies. Run `uv sync` (or `pip install -e .`)
+and you are ready to train and auto-annotate from the UI.
+
+### Prepare a dataset layout (built-in)
+
+In the Streamlit sidebar, click **Prepare YOLO Dataset**. This creates:
+
+```
+datasets/wordbook/
+  images/
+    train/
+    val/
+    test/
+  labels/
+    train/
+    val/
+    test/
+  data.yaml
+```
+
+It uses annotated images from `img/` (train/val split) and, if present, `img/test-data`
+as the test set. Labels are pulled directly from `processed/annotations/`.
+
+### Train + Auto-annotate Test Data
+
+Use the sidebar buttons:
+
+1. **Prepare YOLO Dataset**
+2. **Train YOLO Model**
+3. **Auto-annotate Test Data**
+
+The auto-annotation step writes COCO JSON + YOLO TXT into `processed/annotations/`
+for every image in `img/test-data`. Switch to the **Test** tab to review the overlays.
+
+### Review Results
+
+After **Auto-annotate Test Data**, switch to the **Test** tab to see predicted
+boxes drawn on the test images.

@@ -1,6 +1,7 @@
 """Annotation UI components for manual rectangle drawing."""
 
 import json
+import math
 import cv2
 import numpy as np
 import streamlit as st
@@ -171,7 +172,7 @@ def render_category_toggle() -> str:
     return category
 
 
-def render_annotation_list(image_name: str, source_image: np.ndarray) -> bool:
+def render_annotation_list(image_name: str, source_image: np.ndarray, read_only: bool = False) -> bool:
     """
     Render list of annotations with thumbnails and delete buttons.
     Returns True if any annotation was deleted.
@@ -193,10 +194,10 @@ def render_annotation_list(image_name: str, source_image: np.ndarray) -> bool:
         # Extract thumbnail
         x, y, w, h = box["x"], box["y"], box["w"], box["h"]
         img_h, img_w = source_image.shape[:2]
-        x1 = max(0, min(x, img_w))
-        y1 = max(0, min(y, img_h))
-        x2 = max(0, min(x + w, img_w))
-        y2 = max(0, min(y + h, img_h))
+        x1 = int(max(0, min(x, img_w)))
+        y1 = int(max(0, min(y, img_h)))
+        x2 = int(max(0, min(x + w, img_w)))
+        y2 = int(max(0, min(y + h, img_h)))
 
         if x2 > x1 and y2 > y1:
             thumbnail = source_image[y1:y2, x1:x2]
@@ -221,9 +222,12 @@ def render_annotation_list(image_name: str, source_image: np.ndarray) -> bool:
             st.caption(f"{w}x{h}")
 
         with col3:
-            if st.button("X", key=f"del_{image_name}_{i}"):
-                delete_annotation(image_name, i)
-                deleted = True
+            if read_only:
+                st.button("X", key=f"del_{image_name}_{i}", disabled=True)
+            else:
+                if st.button("X", key=f"del_{image_name}_{i}"):
+                    delete_annotation(image_name, i)
+                    deleted = True
 
     return deleted
 
@@ -233,6 +237,7 @@ def render_drawing_canvas(
     image_name: str,
     category: str,
     canvas_key: str = "annotation_canvas",
+    read_only: bool = False,
 ) -> None:
     """
     Render a drawable canvas with the image as background.
@@ -264,11 +269,31 @@ def render_drawing_canvas(
         cat = ann["category"]
         color = CATEGORIES.get(cat, CATEGORIES["figure"])["color_rgb"]
         x, y, w, h = box["x"], box["y"], box["w"], box["h"]
-        cv2.rectangle(display_image, (x, y), (x + w, y + h), color, 2)
-        cv2.putText(display_image, cat[:3], (x + 2, y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y, w, h)):
+            continue
+        x_i = int(round(x))
+        y_i = int(round(y))
+        w_i = int(round(w))
+        h_i = int(round(h))
+        if w_i <= 0 or h_i <= 0:
+            continue
+        cv2.rectangle(display_image, (x_i, y_i), (x_i + w_i, y_i + h_i), color, 2)
+        cv2.putText(
+            display_image,
+            cat[:3],
+            (x_i + 2, y_i + 15),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            color,
+            1,
+        )
 
     pil_image = Image.fromarray(display_image)
     cat_info = CATEGORIES.get(category, CATEGORIES["figure"])
+
+    if read_only:
+        st.image(pil_image, width=canvas_width)
+        return
 
     canvas_result = st_canvas(
         fill_color=cat_info["fill"],

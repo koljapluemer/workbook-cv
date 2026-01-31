@@ -5,7 +5,7 @@ from ..storage import ImageVersion
 
 
 def render_navigation(
-    image_files: list[Path], current_index: int
+    image_files: list[Path], current_index: int, key_prefix: str = ""
 ) -> tuple[int, bool]:
     """
     Render navigation controls (Prev/Next buttons, image counter).
@@ -19,12 +19,20 @@ def render_navigation(
     changed = False
 
     with col1:
-        if st.button("← Previous", disabled=current_index == 0):
+        if st.button(
+            "← Previous",
+            disabled=current_index == 0,
+            key=f"{key_prefix}_nav_prev",
+        ):
             new_index = current_index - 1
             changed = True
 
     with col2:
-        if st.button("Next →", disabled=current_index >= len(image_files) - 1):
+        if st.button(
+            "Next →",
+            disabled=current_index >= len(image_files) - 1,
+            key=f"{key_prefix}_nav_next",
+        ):
             new_index = current_index + 1
             changed = True
 

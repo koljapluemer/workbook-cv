@@ -11,4 +11,5 @@ dependencies = [
     "numpy>=1.26.0",
     "streamlit-drawable-canvas>=0.9.0",
     "setuptools",
+    "ultralytics>=8.4.9",
 ]
