@@ -1,0 +1,1 @@
+# Wordbook-CV modular architecture
