@@ -4,11 +4,11 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Generator
 
-from ..storage import VersionManager
-from ..processing import CleanupPipeline, detect_bounding_boxes
+from PIL import Image
+from ..processing import detect_bounding_boxes
 from ..export.yolo_dataset import build_yolo_dataset
 from ..export.yolo_auto import train_yolo_model, auto_annotate_test_images
-from .components import render_navigation, render_version_dropdown
+from .components import render_navigation
 from .datasets import load_datasets, get_image_files
 from .annotation import (
     init_annotation_storage,
@@ -51,7 +51,6 @@ def progress_operation(steps: list[str]) -> Generator[callable, None, None]:
 
 def _render_dataset_view(
     dataset,
-    version_manager: VersionManager,
 ) -> None:
     image_files = get_image_files(dataset.img_dir)
 
@@ -64,11 +63,8 @@ def _render_dataset_view(
 
     # Initialize session state (per dataset)
     index_key = f"current_index_{dataset.id}"
-    version_key = f"selected_version_{dataset.id}"
     if index_key not in st.session_state:
         st.session_state[index_key] = 0
-    if version_key not in st.session_state:
-        st.session_state[version_key] = "original"
 
     # Navigation
     new_index, nav_changed = render_navigation(
@@ -79,142 +75,38 @@ def _render_dataset_view(
 
     if nav_changed:
         st.session_state[index_key] = new_index
-        st.session_state[version_key] = "original"
         st.rerun()
 
     # Current image
     current_file = image_files[st.session_state[index_key]]
 
-    # Get versions for this image
-    versions = version_manager.list_versions(current_file)
-
-    # Version dropdown and action buttons in sidebar (main dataset only)
+    # Sidebar controls (main dataset only)
     if not dataset.read_only:
         with st.sidebar:
-            st.header("Version Control")
-            selected_version = render_version_dropdown(versions)
+            st.header("Annotations")
 
-            st.divider()
+            st.subheader("Auto-detected boxes")
+            auto_boxes_key = f"auto_boxes_{dataset.id}"
+            auto_sensitivity_key = f"auto_sensitivity_{dataset.id}"
+            show_auto_boxes = st.toggle(
+                "Show auto-detected boxes",
+                value=st.session_state.get(auto_boxes_key, False),
+                key=auto_boxes_key,
+            )
+            sensitivity = st.slider(
+                "Sensitivity",
+                min_value=1,
+                max_value=10,
+                value=st.session_state.get(auto_sensitivity_key, 5),
+                key=auto_sensitivity_key,
+                disabled=not show_auto_boxes,
+            )
 
-            # Clean Up button
-            st.subheader("Clean Up Image")
-
-            # Pipeline step checkboxes
-            do_perspective = st.checkbox("Perspective Correction", value=True)
-            do_deskew = st.checkbox("Deskew", value=True)
-            do_denoise = st.checkbox("Denoise", value=True)
-            do_contrast = st.checkbox("Contrast Enhancement", value=True)
-            do_white_balance = st.checkbox("White Balance", value=False)
-
-            if st.button("Run Cleanup Pipeline"):
-                steps = ["Loading image", "Running cleanup pipeline", "Saving version"]
-                with progress_operation(steps) as update:
-                    update(0)
-                    # Load source image
-                    if selected_version == "original":
-                        source_image = version_manager.load_original(current_file)
-                        source_id = "original"
-                    else:
-                        source = version_manager.get_version(current_file, selected_version)
-                        source_image = source.image
-                        source_id = selected_version
-
-                    update(1)
-                    # Run cleanup pipeline
-                    pipeline = CleanupPipeline(
-                        do_perspective=do_perspective,
-                        do_deskew=do_deskew,
-                        do_denoise=do_denoise,
-                        do_contrast=do_contrast,
-                        do_white_balance=do_white_balance,
-                    )
-                    cleaned_image, metadata = pipeline.run(source_image)
-
-                    update(2)
-                    # Save as new version
-                    version = version_manager.create_version(
-                        original=current_file,
-                        type="cleanup",
-                        source=source_id,
-                        image=cleaned_image,
-                        params=pipeline.get_params(),
-                        data=metadata,
-                    )
-
-                st.session_state[version_key] = version.id
-                st.success(f"Created {version.display_name}")
-                st.rerun()
-
-            st.divider()
-
-            # Bounding Box Detection
-            st.subheader("Bounding Box Detection")
-
-            # Check if current version is already a bbox result
-            is_bbox_version = False
-            bbox_sensitivity = None
-            if selected_version != "original":
-                current_version_meta = next(
-                    (v for v in versions if v.id == selected_version), None
-                )
-                if current_version_meta and current_version_meta.type == "bbox":
-                    is_bbox_version = True
-                    bbox_sensitivity = current_version_meta.params.get("sensitivity", 5)
-
-            if is_bbox_version:
-                st.slider(
-                    "Sensitivity",
-                    min_value=1,
-                    max_value=10,
-                    value=bbox_sensitivity,
-                    disabled=True,
-                )
-                st.button("Run Detection", disabled=True)
-                st.caption("Already showing bounding box detection result")
-            else:
-                sensitivity = st.slider("Sensitivity", min_value=1, max_value=10, value=5)
-
-                if st.button("Run Detection"):
-                    steps = ["Loading image", "Detecting bounding boxes", "Saving version"]
-                    with progress_operation(steps) as update:
-                        update(0)
-                        # Load source image
-                        if selected_version == "original":
-                            source_image = version_manager.load_original(current_file)
-                            source_id = "original"
-                        else:
-                            source = version_manager.get_version(current_file, selected_version)
-                            source_image = source.image
-                            source_id = selected_version
-
-                        update(1)
-                        # Run detection
-                        result_image, boxes = detect_bounding_boxes(source_image, sensitivity)
-
-                        update(2)
-                        # Save as new version
-                        version = version_manager.create_version(
-                            original=current_file,
-                            type="bbox",
-                            source=source_id,
-                            image=result_image,
-                            params={"sensitivity": sensitivity},
-                            data={"boxes": boxes},
-                        )
-
-                    st.session_state[version_key] = version.id
-                    st.success(f"Created {version.display_name} ({len(boxes)} boxes)")
-                    st.rerun()
-
-            # Draw Annotations section (available for any version)
             st.divider()
             category = render_category_toggle()
 
             # Get source image for thumbnails
-            if selected_version == "original":
-                thumb_source = version_manager.load_original(current_file)
-            else:
-                thumb_source = version_manager.get_version(current_file, selected_version).image
+            thumb_source = _load_original_image(current_file)
 
             # Render annotation list with thumbnails
             deleted = render_annotation_list(current_file.stem, thumb_source, read_only=False)
@@ -254,30 +146,21 @@ def _render_dataset_view(
                 except Exception as exc:
                     st.error(f"Auto-annotation pipeline failed: {exc}")
     else:
-        selected_version = st.session_state[version_key]
         category = "figure"
+        show_auto_boxes = False
+        sensitivity = 5
 
-    # Load and display selected version
-    if selected_version == "original":
-        display_image = version_manager.load_original(current_file)
-        if dataset.read_only:
-            st.info("Showing test image with predicted annotations")
-        else:
-            st.info("Showing original image - Draw rectangles below to annotate")
+    # Load and display image
+    original_image = _load_original_image(current_file)
+    if dataset.read_only:
+        st.info("Showing test image with predicted annotations")
     else:
-        version = version_manager.get_version(current_file, selected_version)
-        display_image = version.image
+        st.info("Showing original image - Draw rectangles below to annotate")
 
-        # Show version info
-        info_text = f"Showing: **{version.display_name}** (source: {version.source})"
-        if version.type == "bbox":
-            box_count = len(version.data.get("boxes", []))
-            info_text += f" - {box_count} boxes detected"
-        if dataset.read_only:
-            info_text += " - Predicted annotations"
-        else:
-            info_text += " - Draw rectangles below to annotate"
-        st.info(info_text)
+    display_image = original_image
+    if not dataset.read_only and show_auto_boxes:
+        display_image, auto_boxes = detect_bounding_boxes(original_image, sensitivity)
+        st.caption(f"Auto-detected {len(auto_boxes)} boxes")
 
     # Render drawable canvas (auto-persists annotations)
     canvas_key = f"canvas_{current_file.stem}"
@@ -312,11 +195,15 @@ def run_app():
         st.error("No datasets found")
         return
 
-    # Initialize version manager and annotation storage
-    version_manager = VersionManager(processed_dir)
     init_annotation_storage(processed_dir)
 
     tabs = st.tabs([ds.label for ds in datasets])
     for tab, ds in zip(tabs, datasets, strict=True):
         with tab:
-            _render_dataset_view(ds, version_manager)
+            _render_dataset_view(ds)
+
+
+def _load_original_image(path: Path) -> np.ndarray:
+    """Load an image as RGB numpy array."""
+    image = Image.open(path)
+    return np.array(image.convert("RGB"))

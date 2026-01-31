@@ -29,10 +29,9 @@ streamlit run app.py
 1. Place images in the `img/` folder
 2. Run the app and browse images with prev/next navigation
 3. Use the sidebar to:
-   - **Clean Up Image**: Run perspective correction, deskew, denoise, contrast enhancement, and white balance (each step toggleable)
-   - **Bounding Box Detection**: Detect text regions with adjustable sensitivity
+   - **Auto-detected boxes**: Toggle red boxes with adjustable sensitivity
    - **Draw Annotations**: Manually draw bounding boxes on images
-4. All processed versions are saved and accessible via the version dropdown
+4. Annotations are saved and accessible per image
 
 ### Test Tab (Read-only)
 
