@@ -104,12 +104,16 @@ def draw_numbered_boxes(
 def run_analysis_pipeline(
     image_path: Path,
     sensitivity: int = DEFAULT_SENSITIVITY,
+    merge_horizontal: int = 0,
+    merge_vertical: int = 0,
 ) -> tuple[np.ndarray, list[AnalysisResult]]:
     """Run the complete analysis pipeline on an image.
 
     Args:
         image_path: Path to the image to analyze.
         sensitivity: Detection sensitivity (1-10).
+        merge_horizontal: Horizontal gap for merging boxes (pixels).
+        merge_vertical: Vertical gap for merging boxes (pixels).
 
     Returns:
         Tuple of (annotated full image, list of AnalysisResult objects).
@@ -122,7 +126,12 @@ def run_analysis_pipeline(
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     # Detect feature rectangles
-    boxes = detect_feature_rectangles(image_rgb, sensitivity=sensitivity)
+    boxes = detect_feature_rectangles(
+        image_rgb,
+        sensitivity=sensitivity,
+        merge_horizontal=merge_horizontal,
+        merge_vertical=merge_vertical,
+    )
 
     # Draw numbered boxes on full image
     annotated_image = draw_numbered_boxes(image_rgb, boxes)
@@ -224,15 +233,20 @@ def run_app() -> None:
         st.info("Please add images to the train directory.")
         return
 
-    # Initialize session state
-    if "sensitivity" not in st.session_state:
-        st.session_state.sensitivity = DEFAULT_SENSITIVITY
+    # Initialize session state with defaults
+    defaults = {
+        "sensitivity": DEFAULT_SENSITIVITY,
+        "merge_horizontal": 0,
+        "merge_vertical": 0,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-    # Controls row
+    # Controls row 1: Image selection and sensitivity
     col1, col2 = st.columns([2, 2])
 
     with col1:
-        # File dropdown
         file_names = [f.name for f in image_files]
         selected_file = st.selectbox(
             "Select image",
@@ -246,14 +260,36 @@ def run_app() -> None:
             "Detection Sensitivity",
             min_value=1,
             max_value=10,
-            value=st.session_state.sensitivity,
             key="sensitivity",
             help="Higher = more sensitive (finds more features)",
         )
 
+    # Controls row 2: Merge settings
+    col3, col4 = st.columns([2, 2])
+
+    with col3:
+        merge_horizontal = st.slider(
+            "Merge Horizontal Gap (px)",
+            min_value=0,
+            max_value=100,
+            key="merge_horizontal",
+            help="Merge boxes within this horizontal distance",
+        )
+
+    with col4:
+        merge_vertical = st.slider(
+            "Merge Vertical Gap (px)",
+            min_value=0,
+            max_value=100,
+            key="merge_vertical",
+            help="Merge boxes within this vertical distance",
+        )
+
     # Run analysis
     with st.spinner("Extracting and analyzing features..."):
-        annotated_image, results = run_analysis_pipeline(image_path, sensitivity)
+        annotated_image, results = run_analysis_pipeline(
+            image_path, sensitivity, merge_horizontal, merge_vertical
+        )
 
     st.success(f"Found {len(results)} features")
 
