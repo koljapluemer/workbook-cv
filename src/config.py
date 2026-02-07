@@ -11,3 +11,6 @@ OCR_OVERLAY_COLOR = (255, 215, 0)  # Yellow in BGR
 
 # Detection settings
 DEFAULT_SENSITIVITY = 8
+
+# Labeling
+LABELS_FILE = Path("data/labels.json")

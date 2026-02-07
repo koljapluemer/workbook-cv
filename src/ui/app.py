@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import streamlit as st
 
-from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY
+from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE
 from src.core import load_first_image, get_image_files, AnalysisResult
 from src.core.types import BoundingBox
 from src.extraction import detect_feature_rectangles, extract_all_features
@@ -19,6 +19,7 @@ from src.analysis import (
     compute_12bin_histogram,
     render_histogram_image,
 )
+from src.labeling import load_labels, save_labels, add_label, get_labels_for_image
 
 MAX_FEATURE_SIZE = 200
 
@@ -167,29 +168,39 @@ def run_analysis_pipeline(
     return annotated_image, results
 
 
-def render_table(results: list[AnalysisResult]) -> None:
-    """Render analysis results as a Streamlit table.
+def render_table(
+    results: list[AnalysisResult],
+    image_file: str,
+    existing_labels: dict[int, str],
+) -> None:
+    """Render analysis results as a Streamlit table with labeling.
 
     Args:
         results: List of AnalysisResult objects to display.
+        image_file: Name of the current image file.
+        existing_labels: Dict mapping feature index to existing label.
     """
     if not results:
         st.warning("No features detected in the image.")
         return
 
     # Header
-    cols = st.columns([0.5, 2, 1, 1, 2])
+    cols = st.columns([0.5, 2, 1, 1, 2, 1])
     cols[0].markdown("**#**")
     cols[1].markdown("**OCR Overlay**")
     cols[2].markdown("**Size**")
     cols[3].markdown("**Coverage**")
     cols[4].markdown("**Histogram**")
+    cols[5].markdown("**Label**")
 
     st.divider()
 
+    label_options = ["label", "figure", "irrelevant"]
+    image_name = Path(image_file).stem
+
     # Rows
     for i, result in enumerate(results):
-        cols = st.columns([0.5, 2, 1, 1, 2])
+        cols = st.columns([0.5, 2, 1, 1, 2, 1])
 
         # Feature number
         cols[0].markdown(f"### {i + 1}")
@@ -210,6 +221,20 @@ def render_table(results: list[AnalysisResult]) -> None:
 
         # Histogram
         cols[4].image(result.histogram_image)
+
+        # Label selection
+        current_label = existing_labels.get(i)
+        default_idx = label_options.index(current_label) if current_label in label_options else None
+
+        with cols[5]:
+            st.radio(
+                "Label",
+                options=label_options,
+                index=default_idx,
+                key=f"label_{image_name}_{i}",
+                horizontal=True,
+                label_visibility="collapsed",
+            )
 
         if i < len(results) - 1:
             st.divider()
@@ -285,6 +310,25 @@ def run_app() -> None:
             help="Merge boxes within this vertical distance",
         )
 
+    # Load labels
+    labels_data = load_labels(LABELS_FILE)
+    existing_labels = get_labels_for_image(labels_data, selected_file)
+
+    # Show label statistics
+    all_labels = [entry["label"] for entry in labels_data["labels"]]
+    label_counts = {
+        "label": all_labels.count("label"),
+        "figure": all_labels.count("figure"),
+        "irrelevant": all_labels.count("irrelevant"),
+    }
+    total_labeled = sum(label_counts.values())
+
+    stat_cols = st.columns(4)
+    stat_cols[0].metric("Total Labeled", total_labeled)
+    stat_cols[1].metric("Labels", label_counts["label"])
+    stat_cols[2].metric("Figures", label_counts["figure"])
+    stat_cols[3].metric("Irrelevant", label_counts["irrelevant"])
+
     # Run analysis
     with st.spinner("Extracting and analyzing features..."):
         annotated_image, results = run_analysis_pipeline(
@@ -298,5 +342,21 @@ def run_app() -> None:
 
     st.divider()
 
-    # Render results table
-    render_table(results)
+    # Render results table with labeling inside a form
+    with st.form("labeling_form"):
+        render_table(results, selected_file, existing_labels)
+
+        st.divider()
+        submitted = st.form_submit_button("Save Labels", type="primary")
+
+        if submitted:
+            image_name = Path(selected_file).stem
+            saved_count = 0
+            for i, result in enumerate(results):
+                key = f"label_{image_name}_{i}"
+                selected_label = st.session_state.get(key)
+                if selected_label:
+                    add_label(labels_data, selected_file, i, selected_label, result)
+                    saved_count += 1
+            save_labels(labels_data, LABELS_FILE)
+            st.success(f"Saved {saved_count} labels")
