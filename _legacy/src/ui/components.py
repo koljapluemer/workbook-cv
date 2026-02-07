@@ -13,7 +13,7 @@ def render_navigation(
     Returns:
         Tuple of (new_index, changed) where changed indicates if navigation occurred
     """
-    col1, col2, col3 = st.columns([1, 1, 3])
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
 
     new_index = current_index
     changed = False
@@ -37,6 +37,21 @@ def render_navigation(
             changed = True
 
     with col3:
+        max_index = max(1, len(image_files))
+        target = st.number_input(
+            "Go to",
+            min_value=1,
+            max_value=max_index,
+            value=current_index + 1,
+            step=1,
+            key=f"{key_prefix}_nav_jump",
+            label_visibility="collapsed",
+        )
+        if int(target) - 1 != current_index:
+            new_index = int(target) - 1
+            changed = True
+
+    with col4:
         st.write(
             f"Image {current_index + 1} of {len(image_files)}: "
             f"**{image_files[current_index].name}**"

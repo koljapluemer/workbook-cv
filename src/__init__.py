@@ -1,1 +1,1 @@
-# Wordbook-CV modular architecture
+# Image Feature Extraction & Analysis

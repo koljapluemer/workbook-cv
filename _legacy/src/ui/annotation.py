@@ -1,5 +1,7 @@
 """Annotation UI components for manual rectangle drawing."""
 
+import base64
+import io
 import json
 import math
 import cv2
@@ -7,7 +9,7 @@ import numpy as np
 import streamlit as st
 from pathlib import Path
 from PIL import Image
-from streamlit_drawable_canvas import st_canvas
+import streamlit_drawable_canvas as sdc
 
 # Category definitions with colors
 CATEGORIES = {
@@ -214,7 +216,11 @@ def render_annotation_list(image_name: str, source_image: np.ndarray, read_only:
 
         with col1:
             if thumbnail is not None:
-                st.image(thumbnail, use_column_width=True)
+                data_uri = _thumbnail_to_data_uri(thumbnail)
+                st.markdown(
+                    f"<img src='{data_uri}' style='width:100%; height:auto;' />",
+                    unsafe_allow_html=True,
+                )
 
         with col2:
             color_hex = cat_info["color_hex"]
@@ -295,7 +301,7 @@ def render_drawing_canvas(
         st.image(pil_image, width=canvas_width)
         return
 
-    canvas_result = st_canvas(
+    canvas_result = _st_canvas_with_data_bg(
         fill_color=cat_info["fill"],
         stroke_width=2,
         stroke_color=cat_info["color_hex"],
@@ -346,3 +352,81 @@ def _extract_boxes(objects: list, scale: float) -> list[dict]:
             if box["w"] > 0 and box["h"] > 0:
                 boxes.append(box)
     return boxes
+
+
+def _resize_pil_image(image: Image.Image, height: int, width: int) -> Image.Image:
+    """Resize to canvas dimensions while keeping aspect scaling from st_canvas."""
+    if image.height == 0 or image.width == 0:
+        return image
+    h_ratio = height / image.height
+    w_ratio = width / image.width
+    return image.resize((int(image.width * w_ratio), int(image.height * h_ratio)))
+
+
+def _pil_to_data_url(image: Image.Image) -> str:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _data_url_to_image(data_url: str) -> Image.Image:
+    _, encoded = data_url.split(";base64,", 1)
+    return Image.open(io.BytesIO(base64.b64decode(encoded)))
+
+
+def _st_canvas_with_data_bg(
+    fill_color: str = "#eee",
+    stroke_width: int = 20,
+    stroke_color: str = "black",
+    background_color: str = "",
+    background_image: Image.Image | None = None,
+    update_streamlit: bool = True,
+    height: int = 400,
+    width: int = 600,
+    drawing_mode: str = "freedraw",
+    initial_drawing: dict | None = None,
+    display_toolbar: bool = True,
+    point_display_radius: int = 3,
+    key: str | None = None,
+) -> sdc.CanvasResult:
+    """Wrapper around st_canvas that embeds background as data URL to avoid /media files."""
+    background_image_url = None
+    if background_image is not None:
+        resized = _resize_pil_image(background_image, height, width)
+        background_image_url = _pil_to_data_url(resized)
+        background_color = ""
+
+    initial_drawing = {"version": "4.4.0"} if initial_drawing is None else initial_drawing
+    initial_drawing["background"] = background_color
+
+    component_value = sdc._component_func(
+        fillColor=fill_color,
+        strokeWidth=stroke_width,
+        strokeColor=stroke_color,
+        backgroundColor=background_color,
+        backgroundImageURL=background_image_url,
+        realtimeUpdateStreamlit=update_streamlit and (drawing_mode != "polygon"),
+        canvasHeight=height,
+        canvasWidth=width,
+        drawingMode=drawing_mode,
+        initialDrawing=initial_drawing,
+        displayToolbar=display_toolbar,
+        displayRadius=point_display_radius,
+        key=key,
+        default=None,
+    )
+    if component_value is None:
+        return sdc.CanvasResult
+
+    image_data = np.asarray(_data_url_to_image(component_value["data"]))
+    return sdc.CanvasResult(image_data, component_value["raw"])
+
+
+def _thumbnail_to_data_uri(thumbnail: np.ndarray) -> str:
+    """Convert a thumbnail image to a data URI to avoid file-based media caching."""
+    thumb_pil = Image.fromarray(thumbnail)
+    buffer = io.BytesIO()
+    thumb_pil.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"

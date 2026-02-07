@@ -1,6 +1,6 @@
-"""Wordbook-CV: Textbook image processing and annotation tool."""
+"""Entry point for the Streamlit application."""
 
-from src.ui import run_app
+from src.ui.app import run_app
 
 if __name__ == "__main__":
     run_app()

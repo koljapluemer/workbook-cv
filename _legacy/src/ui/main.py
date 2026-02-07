@@ -77,7 +77,6 @@ def _render_dataset_view(
 
     if nav_changed:
         st.session_state[index_key] = new_index
-        st.rerun()
 
     # Current image
     current_file = image_files[st.session_state[index_key]]
@@ -86,6 +85,11 @@ def _render_dataset_view(
     if not dataset.read_only:
         with st.sidebar:
             st.header("Annotations")
+
+            if st.button("Refresh image cache"):
+                for key in list(st.session_state.keys()):
+                    if key.startswith("ocr_cache_") or key.startswith("canvas_reset_"):
+                        del st.session_state[key]
 
             st.subheader("Auto-detected boxes")
             auto_boxes_key = f"auto_boxes_{dataset.id}"
@@ -129,9 +133,7 @@ def _render_dataset_view(
             thumb_source = _load_original_image(current_file)
 
             # Render annotation list with thumbnails
-            deleted = render_annotation_list(current_file.stem, thumb_source, read_only=False)
-            if deleted:
-                st.rerun()
+            render_annotation_list(current_file.stem, thumb_source, read_only=False)
 
             st.divider()
             st.caption("Annotations auto-saved to processed/annotations/")
@@ -192,21 +194,20 @@ def _render_dataset_view(
 
     # Render drawable canvas (auto-persists annotations)
     canvas_key = f"canvas_{current_file.stem}"
-    render_drawing_canvas(
-        display_image,
-        current_file.stem,
-        category,
-        canvas_key,
-        read_only=dataset.read_only,
-    )
+    if dataset.read_only:
+        st.image(str(current_file), use_column_width=True)
+    else:
+        render_drawing_canvas(
+            display_image,
+            current_file.stem,
+            category,
+            canvas_key,
+            read_only=dataset.read_only,
+        )
 
     if dataset.read_only:
         st.subheader("Annotations")
-        deleted = render_annotation_list(
-            current_file.stem, display_image, read_only=True
-        )
-        if deleted:
-            st.rerun()
+        render_annotation_list(current_file.stem, display_image, read_only=True)
 
 
 def run_app():
