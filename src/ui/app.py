@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import cv2
 import numpy as np
 import streamlit as st
 
-from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE
+from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE, VALIDATE_DIR, SETTINGS_FILE
 from src.core import load_first_image, get_image_files, AnalysisResult
 from src.core.types import BoundingBox
 from src.extraction import detect_feature_rectangles, extract_all_features
@@ -20,8 +21,30 @@ from src.analysis import (
     render_histogram_image,
 )
 from src.labeling import load_labels, save_labels, add_label, get_labels_for_image
+from src.classifier import train_classifier, predict_features, PredictionResult
 
 MAX_FEATURE_SIZE = 200
+
+DEFAULT_SETTINGS = {
+    "sensitivity": DEFAULT_SENSITIVITY,
+    "merge_horizontal": 0,
+    "merge_vertical": 0,
+}
+
+
+def load_settings() -> dict:
+    """Load UI settings from disk."""
+    if SETTINGS_FILE.exists():
+        with open(SETTINGS_FILE) as f:
+            return {**DEFAULT_SETTINGS, **json.load(f)}
+    return DEFAULT_SETTINGS.copy()
+
+
+def save_settings(settings: dict) -> None:
+    """Save UI settings to disk."""
+    SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(settings, f, indent=2)
 
 
 def resize_to_max(image: np.ndarray, max_size: int = MAX_FEATURE_SIZE) -> np.ndarray:
@@ -240,16 +263,75 @@ def render_table(
             st.divider()
 
 
-def run_app() -> None:
-    """Main entry point for the Streamlit app."""
-    st.set_page_config(
-        page_title="Image Feature Extraction",
-        page_icon="🔍",
-        layout="wide",
-    )
+def render_prediction_table(
+    results: list[AnalysisResult],
+    predictions: list[PredictionResult],
+) -> None:
+    """Render analysis results with predictions (read-only).
 
-    st.title("Image Feature Extraction & Analysis")
+    Args:
+        results: List of AnalysisResult objects to display.
+        predictions: List of PredictionResult with predicted labels.
+    """
+    if not results:
+        st.warning("No features detected in the image.")
+        return
 
+    # Header
+    cols = st.columns([0.5, 2, 1, 1, 2, 1.5])
+    cols[0].markdown("**#**")
+    cols[1].markdown("**OCR Overlay**")
+    cols[2].markdown("**Size**")
+    cols[3].markdown("**Coverage**")
+    cols[4].markdown("**Histogram**")
+    cols[5].markdown("**Prediction**")
+
+    st.divider()
+
+    # Label emoji mapping
+    label_emoji = {
+        "label": "L",
+        "figure": "F",
+        "irrelevant": "X",
+    }
+
+    # Rows
+    for i, (result, prediction) in enumerate(zip(results, predictions)):
+        cols = st.columns([0.5, 2, 1, 1, 2, 1.5])
+
+        # Feature number
+        cols[0].markdown(f"### {i + 1}")
+
+        # OCR overlay (resized)
+        resized_overlay = resize_to_max(result.ocr_overlay_image)
+        cols[1].image(resized_overlay)
+
+        # Size in pixels
+        h, w = result.feature.image.shape[:2]
+        cols[2].markdown(f"**{w} x {h}** px")
+
+        # Coverage percentage
+        cols[3].metric(
+            label="Text Coverage",
+            value=f"{result.text_coverage_percent:.1f}%",
+        )
+
+        # Histogram
+        cols[4].image(result.histogram_image)
+
+        # Prediction with confidence
+        emoji = label_emoji.get(prediction.label, "?")
+        cols[5].markdown(
+            f"**[{emoji}] {prediction.label}**\n\n"
+            f"*{prediction.confidence * 100:.1f}% confidence*"
+        )
+
+        if i < len(results) - 1:
+            st.divider()
+
+
+def run_labeling_tab() -> None:
+    """Run the labeling tab UI."""
     # Get available images
     image_files = get_image_files(TRAIN_DIR)
 
@@ -258,15 +340,19 @@ def run_app() -> None:
         st.info("Please add images to the train directory.")
         return
 
-    # Initialize session state with defaults
-    defaults = {
-        "sensitivity": DEFAULT_SENSITIVITY,
-        "merge_horizontal": 0,
-        "merge_vertical": 0,
-    }
-    for key, value in defaults.items():
+    # Load settings from disk and initialize session state
+    settings = load_settings()
+    for key, value in settings.items():
         if key not in st.session_state:
             st.session_state[key] = value
+
+    def on_setting_change():
+        """Save settings when sliders change."""
+        save_settings({
+            "sensitivity": st.session_state.sensitivity,
+            "merge_horizontal": st.session_state.merge_horizontal,
+            "merge_vertical": st.session_state.merge_vertical,
+        })
 
     # Controls row 1: Image selection and sensitivity
     col1, col2 = st.columns([2, 2])
@@ -287,6 +373,7 @@ def run_app() -> None:
             max_value=10,
             key="sensitivity",
             help="Higher = more sensitive (finds more features)",
+            on_change=on_setting_change,
         )
 
     # Controls row 2: Merge settings
@@ -299,6 +386,7 @@ def run_app() -> None:
             max_value=100,
             key="merge_horizontal",
             help="Merge boxes within this horizontal distance",
+            on_change=on_setting_change,
         )
 
     with col4:
@@ -308,6 +396,7 @@ def run_app() -> None:
             max_value=100,
             key="merge_vertical",
             help="Merge boxes within this vertical distance",
+            on_change=on_setting_change,
         )
 
     # Load labels
@@ -360,3 +449,99 @@ def run_app() -> None:
                     saved_count += 1
             save_labels(labels_data, LABELS_FILE)
             st.success(f"Saved {saved_count} labels")
+
+
+def run_train_and_validate() -> None:
+    """Train classifier and run validation on all images."""
+    # Train classifier
+    classifier = train_classifier(LABELS_FILE)
+    if classifier is None:
+        st.error("Failed to train classifier - no labeled data found.")
+        return
+
+    st.success(f"Trained classifier on {classifier.n_samples} samples")
+
+    # Get validation images
+    validate_files = get_image_files(VALIDATE_DIR)
+    if not validate_files:
+        st.warning(f"No validation images found in {VALIDATE_DIR}")
+        return
+
+    # Process each validation image
+    all_results = []
+    all_predictions = []
+
+    progress = st.progress(0)
+    for i, image_path in enumerate(validate_files):
+        with st.spinner(f"Processing {image_path.name}..."):
+            _, results = run_analysis_pipeline(image_path)
+            if results:
+                predictions = predict_features(results, classifier)
+                all_results.extend(results)
+                all_predictions.extend(predictions)
+        progress.progress((i + 1) / len(validate_files))
+
+    progress.empty()
+
+    # Store results in session state
+    st.session_state["validation_results"] = all_results
+    st.session_state["validation_predictions"] = all_predictions
+
+
+def run_validation_tab() -> None:
+    """Run the validation tab UI."""
+    # Load labels to get count
+    labels_data = load_labels(LABELS_FILE)
+    n_labeled = len(labels_data.get("labels", []))
+
+    # Get validation image count
+    validate_files = get_image_files(VALIDATE_DIR)
+    n_validate = len(validate_files)
+
+    # Show statistics
+    stat_cols = st.columns(2)
+    stat_cols[0].metric("Labeled Samples", n_labeled)
+    stat_cols[1].metric("Validation Images", n_validate)
+
+    # Show warnings if prerequisites are missing
+    if n_labeled == 0:
+        st.warning("No labeled samples found. Please label some features in the Labeling tab first.")
+
+    if n_validate == 0:
+        st.warning(f"No validation images found in {VALIDATE_DIR}. Please add images to validate.")
+
+    # Train button (disabled if prerequisites missing)
+    can_train = n_labeled > 0 and n_validate > 0
+
+    if st.button("Train Network and Check", type="primary", disabled=not can_train):
+        run_train_and_validate()
+
+    # Display results if available
+    if "validation_results" in st.session_state and "validation_predictions" in st.session_state:
+        results = st.session_state["validation_results"]
+        predictions = st.session_state["validation_predictions"]
+
+        if results:
+            st.divider()
+            st.subheader(f"Predictions ({len(results)} features)")
+            render_prediction_table(results, predictions)
+
+
+def run_app() -> None:
+    """Main entry point for the Streamlit app."""
+    st.set_page_config(
+        page_title="Image Feature Extraction",
+        page_icon="?",
+        layout="wide",
+    )
+
+    st.title("Image Feature Extraction & Analysis")
+
+    # Create tabs
+    labeling_tab, validation_tab = st.tabs(["Labeling", "Train & Validate"])
+
+    with labeling_tab:
+        run_labeling_tab()
+
+    with validation_tab:
+        run_validation_tab()

@@ -14,3 +14,9 @@ DEFAULT_SENSITIVITY = 8
 
 # Labeling
 LABELS_FILE = Path("data/labels.json")
+
+# Validation
+VALIDATE_DIR = Path("src/img/validate")
+
+# UI Settings
+SETTINGS_FILE = Path("data/settings.json")

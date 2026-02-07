@@ -13,4 +13,5 @@ dependencies = [
     "setuptools",
     "ultralytics>=8.4.9",
     "pytesseract>=0.3.10",
+    "scikit-learn>=1.8.0",
 ]
