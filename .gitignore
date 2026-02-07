@@ -224,3 +224,7 @@ img/
 *pt
 
 runs/**.png
+*.png
+*.jpg
+*.json
+*.csv
