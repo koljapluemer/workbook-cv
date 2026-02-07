@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import cv2
+import numpy as np
 import streamlit as st
 
 from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY
-from src.core import load_first_image, AnalysisResult
+from src.core import load_first_image, get_image_files, AnalysisResult
+from src.core.types import BoundingBox
 from src.extraction import detect_feature_rectangles, extract_all_features
 from src.analysis import (
     detect_text,
@@ -17,27 +20,112 @@ from src.analysis import (
     render_histogram_image,
 )
 
+MAX_FEATURE_SIZE = 200
 
-def run_analysis_pipeline(image_path: Path) -> list[AnalysisResult]:
+
+def resize_to_max(image: np.ndarray, max_size: int = MAX_FEATURE_SIZE) -> np.ndarray:
+    """Resize image to fit within max_size while keeping aspect ratio."""
+    h, w = image.shape[:2]
+    if h <= max_size and w <= max_size:
+        return image
+
+    scale = min(max_size / w, max_size / h)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    return cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+
+def draw_numbered_boxes(
+    image: np.ndarray,
+    boxes: list[BoundingBox],
+    color: tuple[int, int, int] = (0, 255, 0),
+    thickness: int = 3,
+) -> np.ndarray:
+    """Draw numbered rectangles on an image.
+
+    Args:
+        image: RGB image as numpy array.
+        boxes: List of bounding boxes.
+        color: RGB color for rectangles.
+        thickness: Line thickness.
+
+    Returns:
+        Image with numbered rectangles drawn.
+    """
+    overlay = image.copy()
+
+    for i, box in enumerate(boxes):
+        # Draw rectangle
+        cv2.rectangle(
+            overlay,
+            (box.x, box.y),
+            (box.x + box.w, box.y + box.h),
+            color,
+            thickness,
+        )
+
+        # Draw number label
+        label = str(i + 1)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.5
+        label_thickness = 3
+
+        # Get text size for background
+        (text_w, text_h), baseline = cv2.getTextSize(
+            label, font, font_scale, label_thickness
+        )
+
+        # Draw background rectangle for label
+        label_x = box.x
+        label_y = max(box.y - 10, text_h + 10)
+        cv2.rectangle(
+            overlay,
+            (label_x - 2, label_y - text_h - 5),
+            (label_x + text_w + 5, label_y + 5),
+            color,
+            -1,
+        )
+
+        # Draw text
+        cv2.putText(
+            overlay,
+            label,
+            (label_x, label_y),
+            font,
+            font_scale,
+            (0, 0, 0),
+            label_thickness,
+            cv2.LINE_AA,
+        )
+
+    return overlay
+
+
+def run_analysis_pipeline(
+    image_path: Path,
+    sensitivity: int = DEFAULT_SENSITIVITY,
+) -> tuple[np.ndarray, list[AnalysisResult]]:
     """Run the complete analysis pipeline on an image.
 
     Args:
         image_path: Path to the image to analyze.
+        sensitivity: Detection sensitivity (1-10).
 
     Returns:
-        List of AnalysisResult objects for each detected feature.
+        Tuple of (annotated full image, list of AnalysisResult objects).
     """
-    import cv2
-
     # Load image
     image = cv2.imread(str(image_path))
     if image is None:
-        return []
+        return np.array([]), []
 
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
     # Detect feature rectangles
-    boxes = detect_feature_rectangles(image_rgb, sensitivity=DEFAULT_SENSITIVITY)
+    boxes = detect_feature_rectangles(image_rgb, sensitivity=sensitivity)
+
+    # Draw numbered boxes on full image
+    annotated_image = draw_numbered_boxes(image_rgb, boxes)
 
     # Extract features
     features = extract_all_features(image_rgb, boxes, TEMP_DIR)
@@ -67,7 +155,7 @@ def run_analysis_pipeline(image_path: Path) -> list[AnalysisResult]:
         )
         results.append(result)
 
-    return results
+    return annotated_image, results
 
 
 def render_table(results: list[AnalysisResult]) -> None:
@@ -81,32 +169,38 @@ def render_table(results: list[AnalysisResult]) -> None:
         return
 
     # Header
-    cols = st.columns([1, 1, 1, 1])
-    cols[0].markdown("**Original**")
+    cols = st.columns([0.5, 2, 1, 1, 2])
+    cols[0].markdown("**#**")
     cols[1].markdown("**OCR Overlay**")
-    cols[2].markdown("**Coverage**")
-    cols[3].markdown("**Histogram**")
+    cols[2].markdown("**Size**")
+    cols[3].markdown("**Coverage**")
+    cols[4].markdown("**Histogram**")
 
     st.divider()
 
     # Rows
     for i, result in enumerate(results):
-        cols = st.columns([1, 1, 1, 1])
+        cols = st.columns([0.5, 2, 1, 1, 2])
 
-        # Original feature
-        cols[0].image(result.feature.image, use_column_width=True)
+        # Feature number
+        cols[0].markdown(f"### {i + 1}")
 
-        # OCR overlay
-        cols[1].image(result.ocr_overlay_image, use_column_width=True)
+        # OCR overlay (resized)
+        resized_overlay = resize_to_max(result.ocr_overlay_image)
+        cols[1].image(resized_overlay)
+
+        # Size in pixels
+        h, w = result.feature.image.shape[:2]
+        cols[2].markdown(f"**{w} x {h}** px")
 
         # Coverage percentage
-        cols[2].metric(
+        cols[3].metric(
             label="Text Coverage",
             value=f"{result.text_coverage_percent:.1f}%",
         )
 
         # Histogram
-        cols[3].image(result.histogram_image, use_column_width=True)
+        cols[4].image(result.histogram_image)
 
         if i < len(results) - 1:
             st.divider()
@@ -122,27 +216,51 @@ def run_app() -> None:
 
     st.title("Image Feature Extraction & Analysis")
 
-    # Load first image from train directory
-    result = load_first_image(TRAIN_DIR)
+    # Get available images
+    image_files = get_image_files(TRAIN_DIR)
 
-    if result is None:
+    if not image_files:
         st.error(f"No images found in {TRAIN_DIR}")
         st.info("Please add images to the train directory.")
         return
 
-    image, image_path = result
+    # Initialize session state
+    if "sensitivity" not in st.session_state:
+        st.session_state.sensitivity = DEFAULT_SENSITIVITY
 
-    st.subheader(f"Analyzing: {image_path.name}")
+    # Controls row
+    col1, col2 = st.columns([2, 2])
 
-    # Show original image
-    with st.expander("Original Image", expanded=False):
-        st.image(image, use_column_width=True)
+    with col1:
+        # File dropdown
+        file_names = [f.name for f in image_files]
+        selected_file = st.selectbox(
+            "Select image",
+            file_names,
+            key="selected_file",
+        )
+        image_path = TRAIN_DIR / selected_file
+
+    with col2:
+        sensitivity = st.slider(
+            "Detection Sensitivity",
+            min_value=1,
+            max_value=10,
+            value=st.session_state.sensitivity,
+            key="sensitivity",
+            help="Higher = more sensitive (finds more features)",
+        )
 
     # Run analysis
     with st.spinner("Extracting and analyzing features..."):
-        results = run_analysis_pipeline(image_path)
+        annotated_image, results = run_analysis_pipeline(image_path, sensitivity)
 
     st.success(f"Found {len(results)} features")
+
+    # Show annotated image with numbered boxes
+    st.image(annotated_image, use_column_width=True)
+
+    st.divider()
 
     # Render results table
     render_table(results)

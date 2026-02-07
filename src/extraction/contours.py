@@ -10,7 +10,7 @@ from src.core.types import BoundingBox
 
 def detect_feature_rectangles(
     image: np.ndarray,
-    sensitivity: int = 5,
+    sensitivity: int = 8,
 ) -> list[BoundingBox]:
     """Detect rectangular features in an image using contour detection.
 
@@ -28,10 +28,10 @@ def detect_feature_rectangles(
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
 
     # Apply Gaussian blur
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    blurred = cv2.GaussianBlur(gray, (3, 3), 0)
 
     # Adaptive threshold with sensitivity-based block size
-    block_size = 21 - sensitivity
+    block_size = 25 - sensitivity
     if block_size < 3:
         block_size = 3
     if block_size % 2 == 0:
@@ -46,18 +46,18 @@ def detect_feature_rectangles(
         2,
     )
 
-    # Morphological dilation
-    kernel_w = max(1, 20 - sensitivity)
-    kernel_h = max(1, 8 - sensitivity // 2)
+    # Morphological dilation - smaller kernel to avoid merging adjacent features
+    kernel_w = max(1, 12 - sensitivity)
+    kernel_h = max(1, 5 - sensitivity // 3)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, kernel_h))
-    dilated = cv2.dilate(binary, kernel, iterations=3)
+    dilated = cv2.dilate(binary, kernel, iterations=2)
 
     # Find contours
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    # Calculate area thresholds
+    # Calculate area thresholds - lower minimum to catch smaller features
     image_area = image.shape[0] * image.shape[1]
-    min_area_ratio = 0.0005 + (10 - sensitivity) * 0.00015
+    min_area_ratio = 0.0002 + (10 - sensitivity) * 0.0001
     min_area = int(image_area * min_area_ratio)
     max_area = int(image_area * 0.95)
 
