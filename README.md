@@ -139,6 +139,61 @@ wordbook-cv/
         └── main.py             # Main app layout
 ```
 
+## Scripts
+
+### Diversity Heatmap (`scripts/diversity_heatmap.py`)
+
+Slides a square kernel over each train image and produces an **RGB heatmap** where each
+channel encodes a different signal:
+
+| Channel | Signal | Method |
+|---------|--------|--------|
+| **R** | Color diversity | Mean per-channel std dev in the sliding kernel (O(n) box filter) |
+| **G** | Text likelihood | OCR run with 5 Tesseract PSM modes; per-pixel sum of `confidence/100` across all boxes covering that pixel |
+| **B** | HSV color closeness | Euclidean distance in normalised HSV space to a target color (default H=220°, S=65%, V=46%); H distance is circular |
+
+Pure red → visually rich area with no text. Pure green → clear text. Pure blue → pixels near hue 220°.
+
+Outputs per source image:
+
+| Folder | Contents |
+|--------|----------|
+| `heatmaps/` | Full RGB heatmap (R=diversity, G=text, B=color closeness) |
+| `combined/` | Original scan (left) + full heatmap (right) |
+| `channel_r/` | R channel only — color diversity, greyscale |
+| `channel_g/` | G channel only — text likelihood, greyscale |
+| `channel_b/` | B channel only — HSV color closeness, greyscale |
+
+All outputs land under the `--output-dir` root (default `data/heatmaps/`).
+
+```bash
+# Default: kernel size 32, reads from src/img/train/, writes to data/heatmaps/
+uv run python scripts/diversity_heatmap.py
+
+# Custom kernel size
+uv run python scripts/diversity_heatmap.py --kernel-size 64
+
+# Skip OCR (G=0, fast) — diversity only
+uv run python scripts/diversity_heatmap.py --skip-ocr
+
+# Custom input/output directories
+uv run python scripts/diversity_heatmap.py --input-dir src/img/validate --output-dir data/validate_heatmaps
+```
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--kernel-size N` | `32` | Kernel side length in pixels |
+| `--input-dir DIR` | `src/img/train` | Directory of input images |
+| `--output-dir DIR` | `data/heatmaps` | Output root directory |
+| `--skip-ocr` | off | Skip OCR (G channel = 0); faster for diversity-only runs |
+| `--target-hue DEG` | `220` | Target hue in degrees 0–360 for the B channel |
+| `--target-sat S` | `0.65` | Target saturation 0–1 for the B channel |
+| `--target-val V` | `0.46` | Target brightness/value 0–1 for the B channel |
+
+---
+
 ## Model Training (YOLO)
 
 This project already writes YOLO labels to `processed/annotations/{image}.txt` as you annotate.
