@@ -713,7 +713,6 @@ def run_heatmaps_tab() -> None:
         fill_color   = HEATMAP_CLASSES[class_id]["fill"]
 
         existing_labels = load_yolo_labels(label_path)
-        st.caption(f"{len(existing_labels)} box(es) on this image")
 
         if st.button("Clear all boxes", key="heatmap_clear"):
             label_path.write_text("")
@@ -726,26 +725,29 @@ def run_heatmaps_tab() -> None:
 
         initial_drawing = boxes_to_fabric(existing_labels, HEATMAP_CANVAS_WIDTH, canvas_h, img_w, img_h)
 
-        result = st_canvas(
-            fill_color=fill_color,
-            stroke_width=2,
-            stroke_color=stroke_color,
-            background_image=pil_img,
-            initial_drawing=initial_drawing,
-            update_streamlit=True,
-            width=HEATMAP_CANVAS_WIDTH,
-            height=canvas_h,
-            drawing_mode="rect",
-            key=f"canvas_{selected}",
-        )
+        # Form prevents reruns on every stroke — only fires on submit.
+        with st.form("heatmap_label_form"):
+            result = st_canvas(
+                fill_color=fill_color,
+                stroke_width=2,
+                stroke_color=stroke_color,
+                background_image=pil_img,
+                initial_drawing=initial_drawing,
+                update_streamlit=True,
+                width=HEATMAP_CANVAS_WIDTH,
+                height=canvas_h,
+                drawing_mode="rect",
+                key=f"canvas_{selected}",
+            )
 
-        if result.json_data is not None:
+            submitted = st.form_submit_button("Save Labels", type="primary")
+
+        if submitted and result.json_data is not None:
             labels = canvas_to_boxes(
                 result.json_data, HEATMAP_CANVAS_WIDTH, canvas_h, img_w, img_h, class_id
             )
             save_yolo_labels(label_path, labels)
-            if labels:
-                st.caption(f"Saved {len(labels)} box(es) → `{label_path}`")
+            st.success(f"Saved {len(labels)} box(es) → `{label_path}`")
 
 
 def run_labeling_tab() -> None:
