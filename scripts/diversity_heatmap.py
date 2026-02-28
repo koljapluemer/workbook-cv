@@ -68,54 +68,68 @@ def compute_diversity(image: np.ndarray, kernel_size: int) -> np.ndarray:
 # Text likelihood
 # ---------------------------------------------------------------------------
 
-def compute_text_likelihood(image: np.ndarray) -> np.ndarray:
-    """Run OCR with multiple PSM modes; accumulate confidence per pixel.
+def _make_binarized(image: np.ndarray) -> np.ndarray:
+    """Return an adaptive-binarized grayscale version of an RGB image.
 
-    For each detected word box, adds confidence/100 to every pixel inside it.
-    Running 5 PSM modes means a pixel solidly covered by text in all modes
-    can reach a raw value of ~5.0 before normalisation.
+    Adaptive thresholding handles uneven lighting across the page and gives
+    Tesseract a high-contrast black-on-white image it was designed for.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    return cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, blockSize=31, C=10
+    )
+
+
+def _accumulate_ocr(pil_image, likelihood: np.ndarray, h: int, w: int, psm: int) -> None:
+    """Run one Tesseract pass and add confidence values into likelihood in-place."""
+    import pytesseract
+    data = pytesseract.image_to_data(
+        pil_image, config=f"--psm {psm}", output_type=pytesseract.Output.DICT
+    )
+    for i in range(len(data["text"])):
+        if not data["text"][i].strip():
+            continue
+        bx, by, bw, bh = data["left"][i], data["top"][i], data["width"][i], data["height"][i]
+        if bw <= 0 or bh <= 0:
+            continue
+        try:
+            conf = float(data["conf"][i])
+        except (ValueError, TypeError):
+            continue
+        if conf < 0:
+            continue
+        x1, y1 = max(0, bx), max(0, by)
+        x2, y2 = min(w, bx + bw), min(h, by + bh)
+        likelihood[y1:y2, x1:x2] += conf / 100.0
+
+
+def compute_text_likelihood(image: np.ndarray) -> np.ndarray:
+    """Run OCR with multiple PSM modes on both the raw and binarized image.
+
+    Tesseract is tuned for high-contrast black-on-white input, so running on
+    an adaptive-binarized copy in addition to the raw colour image catches text
+    that the raw scan misses (uneven lighting, coloured backgrounds, etc.).
+
+    Each PSM mode × 2 image variants → up to 10 passes total.
+    For each detected word box, adds confidence/100 to every covered pixel.
 
     Returns:
         2D float32 array of accumulated confidence values.
     """
     try:
-        import pytesseract
         from PIL import Image as PILImage
     except ImportError:
-        raise RuntimeError(
-            "pytesseract and Pillow are required for OCR. "
-            "Install with: uv add pytesseract pillow"
-        )
+        raise RuntimeError("Pillow is required. Install with: uv add pillow")
 
     h, w = image.shape[:2]
     likelihood = np.zeros((h, w), dtype=np.float32)
-    pil_image = PILImage.fromarray(image)
+
+    pil_raw = PILImage.fromarray(image)
+    pil_bin = PILImage.fromarray(_make_binarized(image))
 
     for psm in PSM_MODES:
-        config = f"--psm {psm}"
-        data = pytesseract.image_to_data(
-            pil_image, config=config, output_type=pytesseract.Output.DICT
-        )
-
-        for i in range(len(data["text"])):
-            if not data["text"][i].strip():
-                continue
-            bx = data["left"][i]
-            by = data["top"][i]
-            bw = data["width"][i]
-            bh = data["height"][i]
-            if bw <= 0 or bh <= 0:
-                continue
-            try:
-                conf = float(data["conf"][i])
-            except (ValueError, TypeError):
-                continue
-            if conf < 0:
-                continue
-
-            x1, y1 = max(0, bx), max(0, by)
-            x2, y2 = min(w, bx + bw), min(h, by + bh)
-            likelihood[y1:y2, x1:x2] += conf / 100.0
+        _accumulate_ocr(pil_raw, likelihood, h, w, psm)
+        _accumulate_ocr(pil_bin, likelihood, h, w, psm)
 
     return likelihood
 
