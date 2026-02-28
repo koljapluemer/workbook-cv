@@ -14,4 +14,6 @@ dependencies = [
     "ultralytics>=8.4.9",
     "pytesseract>=0.3.10",
     "scikit-learn>=1.8.0",
+    "doclayout-yolo>=0.0.4",
+    "huggingface-hub>=1.5.0",
 ]

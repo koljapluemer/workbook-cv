@@ -11,7 +11,15 @@ import streamlit as st
 
 import datetime
 
-from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE, VALIDATE_DIR, SETTINGS_FILE, VALIDATION_STORE_DIR
+import re
+
+from src.config import (
+    TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE, VALIDATE_DIR,
+    SETTINGS_FILE, VALIDATION_STORE_DIR,
+    HEATMAP_OUTPUT_DIR, HEATMAP_RGB_DIR, HEATMAP_LABELS_DIR,
+    HEATMAP_DEFAULT_KERNEL, HEATMAP_DEFAULT_HUE, HEATMAP_DEFAULT_SAT, HEATMAP_DEFAULT_VAL,
+)
+from src.heatmap import process_image as _generate_heatmap
 from src.core import load_first_image, get_image_files, AnalysisResult
 from src.core.types import BoundingBox, FeatureRect
 from src.extraction import detect_feature_rectangles, extract_all_features
@@ -31,7 +39,17 @@ DEFAULT_SETTINGS = {
     "sensitivity": DEFAULT_SENSITIVITY,
     "merge_horizontal": 0,
     "merge_vertical": 0,
+    "heatmap_kernel": HEATMAP_DEFAULT_KERNEL,
+    "heatmap_skip_ocr": False,
+    "heatmap_hue": HEATMAP_DEFAULT_HUE,
+    "heatmap_sat": HEATMAP_DEFAULT_SAT,
+    "heatmap_val": HEATMAP_DEFAULT_VAL,
 }
+
+
+def _on_setting_change() -> None:
+    """Persist all UI settings from session_state to disk (shared on_change callback)."""
+    save_settings({k: st.session_state.get(k, v) for k, v in DEFAULT_SETTINGS.items()})
 
 
 def load_settings() -> dict:
@@ -481,6 +499,255 @@ def render_prediction_table(
             st.divider()
 
 
+# ---------------------------------------------------------------------------
+# Heatmap labeling helpers
+# ---------------------------------------------------------------------------
+
+HEATMAP_CANVAS_WIDTH = 900
+
+HEATMAP_CLASSES: dict[int, dict] = {
+    0: {"name": "drawing",   "stroke": "#ff4444", "fill": "rgba(255,68,68,0.25)"},
+    1: {"name": "textlabel", "stroke": "#4488ff", "fill": "rgba(68,136,255,0.25)"},
+}
+_CLASS_BY_NAME  = {v["name"]: k for k, v in HEATMAP_CLASSES.items()}
+_CLASS_BY_STROKE = {v["stroke"]: k for k, v in HEATMAP_CLASSES.items()}
+
+
+def load_yolo_labels(path: Path) -> list[tuple[int, float, float, float, float]]:
+    """Load YOLO-format label file. Returns list of (class_id, cx, cy, w, h)."""
+    if not path.exists():
+        return []
+    labels = []
+    for line in path.read_text().strip().splitlines():
+        parts = line.split()
+        if len(parts) == 5:
+            labels.append((int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])))
+    return labels
+
+
+def save_yolo_labels(path: Path, labels: list[tuple[int, float, float, float, float]]) -> None:
+    """Write YOLO-format label file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{c} {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}" for c, cx, cy, w, h in labels]
+    path.write_text("\n".join(lines) + ("\n" if lines else ""))
+
+
+def boxes_to_fabric(
+    labels: list[tuple[int, float, float, float, float]],
+    canvas_w: int,
+    canvas_h: int,
+    img_w: int,
+    img_h: int,
+) -> dict:
+    """Convert YOLO labels to a Fabric.js initial_drawing dict for st_canvas."""
+    sx = canvas_w / img_w
+    sy = canvas_h / img_h
+    objects = []
+    for class_id, cx, cy, nw, nh in labels:
+        cls = HEATMAP_CLASSES.get(class_id, HEATMAP_CLASSES[0])
+        left   = (cx - nw / 2) * img_w * sx
+        top    = (cy - nh / 2) * img_h * sy
+        width  = nw * img_w * sx
+        height = nh * img_h * sy
+        objects.append({
+            "type": "rect",
+            "version": "4.4.0",
+            "originX": "left",
+            "originY": "top",
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+            "fill": cls["fill"],
+            "stroke": cls["stroke"],
+            "strokeWidth": 2,
+            "strokeUniform": True,
+            "selectable": True,
+        })
+    return {"version": "4.4.0", "objects": objects}
+
+
+def canvas_to_boxes(
+    json_data: dict,
+    canvas_w: int,
+    canvas_h: int,
+    img_w: int,
+    img_h: int,
+    default_class_id: int,
+) -> list[tuple[int, float, float, float, float]]:
+    """Parse Fabric.js canvas JSON back to YOLO-format labels."""
+    sx = img_w / canvas_w
+    sy = img_h / canvas_h
+    labels = []
+    for obj in json_data.get("objects", []):
+        if obj.get("type") != "rect":
+            continue
+        stroke = obj.get("stroke", "")
+        class_id = _CLASS_BY_STROKE.get(stroke, default_class_id)
+
+        left   = obj["left"]
+        top    = obj["top"]
+        width  = obj["width"]  * obj.get("scaleX", 1.0)
+        height = obj["height"] * obj.get("scaleY", 1.0)
+
+        img_x  = left   * sx
+        img_y  = top    * sy
+        img_bw = width  * sx
+        img_bh = height * sy
+
+        cx = (img_x + img_bw / 2) / img_w
+        cy = (img_y + img_bh / 2) / img_h
+        nw = img_bw / img_w
+        nh = img_bh / img_h
+
+        cx = max(0.0, min(1.0, cx))
+        cy = max(0.0, min(1.0, cy))
+        nw = max(0.0, min(1.0, nw))
+        nh = max(0.0, min(1.0, nh))
+
+        if nw > 0 and nh > 0:
+            labels.append((class_id, cx, cy, nw, nh))
+    return labels
+
+
+def _heatmap_split(stem: str) -> str:
+    """Return 'train', 'val', or 'unknown' based on source image stem."""
+    # Strip _k{N} suffix e.g. "page_23_k40" → "page_23"
+    source_stem = re.sub(r"_k\d+$", "", stem)
+    if (TRAIN_DIR / (source_stem + ".png")).exists() or (TRAIN_DIR / (source_stem + ".jpg")).exists():
+        return "train"
+    if (VALIDATE_DIR / (source_stem + ".png")).exists() or (VALIDATE_DIR / (source_stem + ".jpg")).exists():
+        return "val"
+    return "unknown"
+
+
+def run_heatmaps_tab() -> None:
+    """Heatmap generation and YOLO bounding-box labeling."""
+    from PIL import Image as PILImage
+    from streamlit_drawable_canvas import st_canvas
+
+    # Ensure heatmap settings are in session_state
+    settings = load_settings()
+    for key, value in settings.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+    # ---- GENERATE SECTION ----
+    st.subheader("Generate Heatmaps")
+
+    train_images = get_image_files(TRAIN_DIR)
+    val_images   = get_image_files(VALIDATE_DIR)
+    n_rgb = len(list(HEATMAP_RGB_DIR.glob("*.png"))) if HEATMAP_RGB_DIR.exists() else 0
+
+    met_cols = st.columns(3)
+    met_cols[0].metric("Train images", len(train_images))
+    met_cols[1].metric("Val images",   len(val_images))
+    met_cols[2].metric("RGB heatmaps on disk", n_rgb)
+
+    with st.expander("Generation Settings"):
+        g_col1, g_col2 = st.columns(2)
+        with g_col1:
+            st.slider("Kernel size (px)", 10, 100, key="heatmap_kernel", on_change=_on_setting_change)
+            st.checkbox("Skip OCR (faster, G=0)", key="heatmap_skip_ocr", on_change=_on_setting_change)
+        with g_col2:
+            st.slider("Target hue (°)", 0, 360, key="heatmap_hue", on_change=_on_setting_change)
+            st.slider("Target saturation (%)", 0, 100, key="heatmap_sat", on_change=_on_setting_change)
+            st.slider("Target value/brightness (%)", 0, 100, key="heatmap_val", on_change=_on_setting_change)
+
+    all_images = train_images + val_images
+    if st.button("Generate Heatmaps", type="primary", disabled=not all_images):
+        kernel = st.session_state.heatmap_kernel
+        skip   = st.session_state.heatmap_skip_ocr
+        hue    = st.session_state.heatmap_hue
+        sat    = st.session_state.heatmap_sat / 100.0
+        val    = st.session_state.heatmap_val / 100.0
+
+        progress = st.progress(0)
+        status   = st.empty()
+        for i, img_path in enumerate(all_images):
+            status.caption(f"Processing {img_path.name}...")
+            _generate_heatmap(img_path, kernel, HEATMAP_OUTPUT_DIR, skip, hue, sat, val)
+            progress.progress((i + 1) / len(all_images))
+        progress.empty()
+        status.empty()
+        st.success(f"Generated {len(all_images)} heatmap(s) → `{HEATMAP_OUTPUT_DIR}/rgb/`")
+        st.rerun()
+
+    st.divider()
+
+    # ---- LABEL SECTION ----
+    st.subheader("Label Heatmaps")
+
+    if not HEATMAP_RGB_DIR.exists() or not any(HEATMAP_RGB_DIR.iterdir()):
+        st.info("No heatmaps yet — click **Generate Heatmaps** above.")
+        return
+
+    heatmap_files = sorted(
+        p for p in HEATMAP_RGB_DIR.iterdir()
+        if p.suffix.lower() in {".png", ".jpg", ".jpeg"}
+    )
+
+    HEATMAP_LABELS_DIR.mkdir(parents=True, exist_ok=True)
+    n_labeled = sum(1 for f in HEATMAP_LABELS_DIR.glob("*.txt") if f.stat().st_size > 0)
+
+    col_ctrl, col_canvas = st.columns([1, 4])
+
+    with col_ctrl:
+        st.metric("Labeled images", n_labeled, help="Images with at least one box saved")
+
+        file_names = [f.name for f in heatmap_files]
+        selected     = st.selectbox("Heatmap image", file_names, key="heatmap_file")
+        heatmap_path = HEATMAP_RGB_DIR / selected
+        label_path   = HEATMAP_LABELS_DIR / (heatmap_path.stem + ".txt")
+
+        split = _heatmap_split(heatmap_path.stem)
+        st.caption(f"Split: **{split}**")
+
+        class_name = st.radio(
+            "Draw class",
+            options=[v["name"] for v in HEATMAP_CLASSES.values()],
+            key="heatmap_class",
+        )
+        class_id     = _CLASS_BY_NAME[class_name]
+        stroke_color = HEATMAP_CLASSES[class_id]["stroke"]
+        fill_color   = HEATMAP_CLASSES[class_id]["fill"]
+
+        existing_labels = load_yolo_labels(label_path)
+        st.caption(f"{len(existing_labels)} box(es) on this image")
+
+        if st.button("Clear all boxes", key="heatmap_clear"):
+            label_path.write_text("")
+            st.rerun()
+
+    with col_canvas:
+        pil_img = PILImage.open(heatmap_path).convert("RGB")
+        img_w, img_h = pil_img.size
+        canvas_h = int(HEATMAP_CANVAS_WIDTH * img_h / img_w)
+
+        initial_drawing = boxes_to_fabric(existing_labels, HEATMAP_CANVAS_WIDTH, canvas_h, img_w, img_h)
+
+        result = st_canvas(
+            fill_color=fill_color,
+            stroke_width=2,
+            stroke_color=stroke_color,
+            background_image=pil_img,
+            initial_drawing=initial_drawing,
+            update_streamlit=True,
+            width=HEATMAP_CANVAS_WIDTH,
+            height=canvas_h,
+            drawing_mode="rect",
+            key=f"canvas_{selected}",
+        )
+
+        if result.json_data is not None:
+            labels = canvas_to_boxes(
+                result.json_data, HEATMAP_CANVAS_WIDTH, canvas_h, img_w, img_h, class_id
+            )
+            save_yolo_labels(label_path, labels)
+            if labels:
+                st.caption(f"Saved {len(labels)} box(es) → `{label_path}`")
+
+
 def run_labeling_tab() -> None:
     """Run the labeling tab UI."""
     # Get available images
@@ -496,14 +763,6 @@ def run_labeling_tab() -> None:
     for key, value in settings.items():
         if key not in st.session_state:
             st.session_state[key] = value
-
-    def on_setting_change():
-        """Save settings when sliders change."""
-        save_settings({
-            "sensitivity": st.session_state.sensitivity,
-            "merge_horizontal": st.session_state.merge_horizontal,
-            "merge_vertical": st.session_state.merge_vertical,
-        })
 
     # Controls row 1: Image selection and sensitivity
     col1, col2 = st.columns([2, 2])
@@ -524,7 +783,7 @@ def run_labeling_tab() -> None:
             max_value=10,
             key="sensitivity",
             help="Higher = more sensitive (finds more features)",
-            on_change=on_setting_change,
+            on_change=_on_setting_change,
         )
 
     # Controls row 2: Merge settings
@@ -537,7 +796,7 @@ def run_labeling_tab() -> None:
             max_value=100,
             key="merge_horizontal",
             help="Merge boxes within this horizontal distance",
-            on_change=on_setting_change,
+            on_change=_on_setting_change,
         )
 
     with col4:
@@ -547,7 +806,7 @@ def run_labeling_tab() -> None:
             max_value=100,
             key="merge_vertical",
             help="Merge boxes within this vertical distance",
-            on_change=on_setting_change,
+            on_change=_on_setting_change,
         )
 
     # Load labels
@@ -700,10 +959,13 @@ def run_app() -> None:
     st.title("Image Feature Extraction & Analysis")
 
     # Create tabs
-    labeling_tab, validation_tab = st.tabs(["Labeling", "Train & Validate"])
+    labeling_tab, validation_tab, heatmap_tab = st.tabs(["Labeling", "Train & Validate", "Heatmaps"])
 
     with labeling_tab:
         run_labeling_tab()
 
     with validation_tab:
         run_validation_tab()
+
+    with heatmap_tab:
+        run_heatmaps_tab()

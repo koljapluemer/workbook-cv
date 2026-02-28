@@ -23,3 +23,17 @@ SETTINGS_FILE = Path("data/settings.json")
 
 # Validation persistence
 VALIDATION_STORE_DIR = Path("data/validation")
+
+# Heatmaps
+HEATMAP_OUTPUT_DIR    = Path("data/heatmaps")
+HEATMAP_RGB_DIR       = Path("data/heatmaps/rgb")
+HEATMAP_COMBINED_DIR  = Path("data/heatmaps/combined")
+HEATMAP_CHANNEL_R_DIR = Path("data/heatmaps/channel_r")
+HEATMAP_CHANNEL_G_DIR = Path("data/heatmaps/channel_g")
+HEATMAP_CHANNEL_B_DIR = Path("data/heatmaps/channel_b")
+HEATMAP_LABELS_DIR    = Path("data/heatmap_labels")
+
+HEATMAP_DEFAULT_KERNEL = 30
+HEATMAP_DEFAULT_HUE    = 220
+HEATMAP_DEFAULT_SAT    = 65   # 0-100 integer (percent)
+HEATMAP_DEFAULT_VAL    = 46   # 0-100 integer (percent)
