@@ -39,8 +39,8 @@ The app has three tabs:
 
 ### Heatmaps Tab
 
-Generates RGB-encoded heatmaps from source images and lets you draw YOLO bounding boxes
-on them for detector training.
+Generates RGB-encoded heatmaps from source images, lets you label them, then trains a
+segmentation model to detect `drawing` and `textlabel` regions in unseen validation images.
 
 #### Channel encoding
 
@@ -60,10 +60,37 @@ Pure red → visually rich, no text. Pure green → clear text. Pure blue → pi
 
 #### Label
 
-1. Select a heatmap from the dropdown (split: train/val is shown automatically)
+Only heatmaps for `src/img/train/` images are shown — validation images are never human-labeled.
+
+1. Select a heatmap from the dropdown
 2. Choose a draw class: `drawing` (red) or `textlabel` (blue)
-3. Draw rectangles on the canvas — boxes auto-save as YOLO `.txt` files in `data/heatmap_labels/`
+3. Draw rectangles on the canvas — saved as YOLO `.txt` files in `data/heatmap_labels/`
 4. **Clear all boxes** removes all annotations for the current image
+
+#### Train & Detect
+
+After labeling, trains a U-Net segmentation model from scratch on the labeled heatmaps and
+runs it on all validation heatmaps.
+
+YOLO was not used here because its ImageNet-pretrained backbone features (texture detectors,
+edge filters) do not transfer to artificially generated scalar-field images. A small U-Net
+trained from scratch learns heatmap-appropriate features directly.
+
+1. Set **Epochs** (10–200) and **Segmentation threshold** (0.30–0.95)
+2. Click **Build Dataset & Train**:
+   - Copies labeled train heatmaps to `data/heatmap_seg/`
+   - Trains a ~1 M param U-Net with CrossEntropyLoss (background downweighted 10×)
+   - Saves model to `data/models/heatmap_detector/weights/best.pt`
+3. Click **Detect on Validation** (enabled after training):
+   - Runs the U-Net on each validation heatmap → per-pixel class probabilities
+   - Thresholds probabilities → morphological close → connected components → bounding boxes
+   - Draws boxes on the **original source image** (heatmap and source share pixel dimensions, so normalized coordinates apply 1:1)
+   - Saves annotated originals to `data/heatmap_detections/{source_stem}.png`
+   - Saves per-class probability maps (VIRIDIS colorized) to `data/heatmap_detections/debug/`
+4. Annotated images are displayed in a grid below the buttons
+
+The **segmentation threshold** controls where each class probability map is binarized before
+box extraction. Lower = more/looser boxes, higher = fewer/tighter boxes.
 
 ## Folder Structure
 
@@ -73,7 +100,8 @@ wordbook-cv/
 ├── src/
 │   ├── config.py               # Path constants and defaults
 │   ├── heatmap/
-│   │   └── generation.py       # Diversity, OCR likelihood, HSV closeness
+│   │   ├── generation.py       # Diversity, OCR likelihood, HSV closeness
+│   │   └── detector.py         # HeatmapDetector ABC + SegmentationDetector (U-Net)
 │   ├── classifier/             # RandomForest training & prediction
 │   ├── analysis/               # OCR, histogram, coverage
 │   ├── extraction/             # Feature rectangle detection
@@ -90,9 +118,13 @@ wordbook-cv/
     │   ├── channel_r/          # Color diversity (grayscale)
     │   ├── channel_g/          # Text likelihood (grayscale)
     │   └── channel_b/          # HSV closeness (grayscale)
-    ├── heatmap_labels/         # YOLO labels for heatmap images
+    ├── heatmap_labels/         # Human-drawn YOLO labels (train images only)
+    ├── heatmap_seg/            # Segmentation training dataset (images + labels)
+    ├── heatmap_detections/     # Annotated original val images
+    │   └── debug/              # Per-class probability maps (VIRIDIS)
     ├── validation/             # Validation results & feature images
-    ├── models/                 # Trained models
+    ├── models/
+    │   └── heatmap_detector/   # Trained U-Net weights (best.pt)
     ├── labels.json             # Feature labels (source of truth)
     └── settings.json           # Persisted UI settings
 ```
@@ -101,7 +133,7 @@ wordbook-cv/
 
 Feature labels are stored in `data/labels.json` and used to train the RandomForest classifier.
 
-### YOLO Heatmap Labels
+### Heatmap Labels
 
 Bounding boxes drawn in the **Heatmaps** tab are saved to `data/heatmap_labels/{stem}.txt`
 in standard YOLO format:
@@ -112,3 +144,10 @@ class_id center_x center_y width height
 
 - All coordinates normalised to 0–1
 - Class 0 = `drawing`, Class 1 = `textlabel`
+
+### Detector Architecture
+
+`src/heatmap/detector.py` defines a `HeatmapDetector` ABC with `train()`, `detect()`,
+`save()`, and `load()`. `SegmentationDetector` implements this using a lightweight U-Net.
+To try a different backend (e.g. patch classifier + sliding window), implement the same
+interface and swap the class name in `_run_seg_training` / `_run_seg_detection` in `src/ui/app.py`.

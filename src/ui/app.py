@@ -3,22 +3,23 @@
 from __future__ import annotations
 
 import json
+import re
+import datetime
 from pathlib import Path
+from shutil import copy2
 
 import cv2
 import numpy as np
 import streamlit as st
 
-import datetime
-
-import re
-
 from src.config import (
     TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE, VALIDATE_DIR,
     SETTINGS_FILE, VALIDATION_STORE_DIR,
     HEATMAP_OUTPUT_DIR, HEATMAP_RGB_DIR, HEATMAP_LABELS_DIR,
+    HEATMAP_SEG_DIR, HEATMAP_MODEL_PATH, HEATMAP_DETECTIONS_DIR,
     HEATMAP_DEFAULT_KERNEL, HEATMAP_DEFAULT_HUE, HEATMAP_DEFAULT_SAT, HEATMAP_DEFAULT_VAL,
 )
+from src.heatmap.detector import SegmentationDetector, HeatmapDetector
 from src.heatmap import process_image as _generate_heatmap
 from src.core import load_first_image, get_image_files, AnalysisResult
 from src.core.types import BoundingBox, FeatureRect
@@ -621,6 +622,96 @@ def _heatmap_split(stem: str) -> str:
     return "unknown"
 
 
+def _build_seg_dataset() -> int:
+    """Copy human-labeled train heatmaps into the segmentation dataset layout.
+
+    Only heatmaps whose source image lives in TRAIN_DIR are used.
+    Mask generation happens inside SegmentationDetector.train().
+
+    Returns:
+        n_train: number of labeled train images copied.
+    """
+    (HEATMAP_SEG_DIR / "images").mkdir(parents=True, exist_ok=True)
+    (HEATMAP_SEG_DIR / "labels").mkdir(parents=True, exist_ok=True)
+
+    n_train = 0
+    for label_path in HEATMAP_LABELS_DIR.glob("*.txt"):
+        if label_path.stat().st_size == 0:
+            continue
+        if _heatmap_split(label_path.stem) != "train":
+            continue
+        img_src = HEATMAP_RGB_DIR / (label_path.stem + ".png")
+        if not img_src.exists():
+            continue
+        copy2(img_src, HEATMAP_SEG_DIR / "images" / img_src.name)
+        copy2(label_path, HEATMAP_SEG_DIR / "labels" / label_path.name)
+        n_train += 1
+    return n_train
+
+
+def _run_seg_training(epochs: int) -> None:
+    """Train U-Net segmentation model on labeled heatmaps."""
+    image_paths = sorted((HEATMAP_SEG_DIR / "images").glob("*.png"))
+    label_paths = [
+        HEATMAP_SEG_DIR / "labels" / p.with_suffix(".txt").name
+        for p in image_paths
+    ]
+    detector = SegmentationDetector()
+    detector.train(image_paths, label_paths, epochs)
+    HEATMAP_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+    detector.save(HEATMAP_MODEL_PATH)
+
+
+def _run_seg_detection(threshold: float) -> list[Path]:
+    """Run the trained segmentation model on val heatmaps and annotate source images.
+
+    Returns:
+        List of paths to annotated source images saved in HEATMAP_DETECTIONS_DIR.
+    """
+    detector = SegmentationDetector.load(HEATMAP_MODEL_PATH)
+    val_heatmaps = [
+        p for p in HEATMAP_RGB_DIR.glob("*.png")
+        if _heatmap_split(p.stem) == "val"
+    ]
+
+    HEATMAP_DETECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    saved_paths: list[Path] = []
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    for heatmap_path in val_heatmaps:
+        source_stem = re.sub(r"_k\d+$", "", heatmap_path.stem)
+        src_img_path = None
+        for ext in (".png", ".jpg", ".jpeg"):
+            candidate = VALIDATE_DIR / (source_stem + ext)
+            if candidate.exists():
+                src_img_path = candidate
+                break
+        if src_img_path is None:
+            continue
+
+        src_img = cv2.imread(str(src_img_path))
+        if src_img is None:
+            continue
+        h, w = src_img.shape[:2]
+
+        boxes = detector.detect(heatmap_path, threshold, debug_dir=HEATMAP_DETECTIONS_DIR / "debug")
+        for cls_id, x1n, y1n, x2n, y2n in boxes:
+            color = HeatmapDetector.CLASS_COLORS.get(cls_id, (0, 255, 0))
+            name  = HeatmapDetector.CLASS_NAMES.get(cls_id, str(cls_id))
+            x1, y1, x2, y2 = int(x1n * w), int(y1n * h), int(x2n * w), int(y2n * h)
+            cv2.rectangle(src_img, (x1, y1), (x2, y2), color, 3)
+            (tw, th), _ = cv2.getTextSize(name, font, 0.7, 2)
+            label_y = max(y1 - 6, th + 6)
+            cv2.rectangle(src_img, (x1, label_y - th - 4), (x1 + tw + 4, label_y + 2), color, -1)
+            cv2.putText(src_img, name, (x1 + 2, label_y), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+        out_path = HEATMAP_DETECTIONS_DIR / (source_stem + ".png")
+        cv2.imwrite(str(out_path), src_img)
+        saved_paths.append(out_path)
+
+    return saved_paths
+
+
 def run_heatmaps_tab() -> None:
     """Heatmap generation and YOLO bounding-box labeling."""
     from PIL import Image as PILImage
@@ -682,18 +773,23 @@ def run_heatmaps_tab() -> None:
         st.info("No heatmaps yet — click **Generate Heatmaps** above.")
         return
 
+    # Only show train-split heatmaps — val images are for inference, not labeling
     heatmap_files = sorted(
         p for p in HEATMAP_RGB_DIR.iterdir()
         if p.suffix.lower() in {".png", ".jpg", ".jpeg"}
+        and _heatmap_split(p.stem) == "train"
     )
 
     HEATMAP_LABELS_DIR.mkdir(parents=True, exist_ok=True)
-    n_labeled = sum(1 for f in HEATMAP_LABELS_DIR.glob("*.txt") if f.stat().st_size > 0)
+    n_labeled = sum(
+        1 for f in HEATMAP_LABELS_DIR.glob("*.txt")
+        if f.stat().st_size > 0 and _heatmap_split(f.stem) == "train"
+    )
 
     col_ctrl, col_canvas = st.columns([1, 4])
 
     with col_ctrl:
-        st.metric("Labeled images", n_labeled, help="Images with at least one box saved")
+        st.metric("Labeled train images", n_labeled, help="Train heatmaps with at least one box saved")
 
         file_names = [f.name for f in heatmap_files]
         selected     = st.selectbox("Heatmap image", file_names, key="heatmap_file")
@@ -748,6 +844,57 @@ def run_heatmaps_tab() -> None:
             )
             save_yolo_labels(label_path, labels)
             st.success(f"Saved {len(labels)} box(es) → `{label_path}`")
+
+    # ---- TRAIN & DETECT SECTION ----
+    st.divider()
+    st.subheader("Train & Detect")
+
+    # Count human-labeled train heatmaps (val images are never labeled by humans)
+    n_labeled_train = sum(
+        1 for f in HEATMAP_LABELS_DIR.glob("*.txt")
+        if f.stat().st_size > 0 and _heatmap_split(f.stem) == "train"
+    )
+    n_val_heatmaps = sum(
+        1 for p in HEATMAP_RGB_DIR.glob("*.png")
+        if _heatmap_split(p.stem) == "val"
+    ) if HEATMAP_RGB_DIR.exists() else 0
+    model_exists = HEATMAP_MODEL_PATH.exists()
+
+    td_cols = st.columns(3)
+    td_cols[0].metric("Labeled train heatmaps", n_labeled_train)
+    td_cols[1].metric("Val heatmaps to detect", n_val_heatmaps)
+    td_cols[2].metric("Model", "ready" if model_exists else "not trained")
+
+    epochs    = st.slider("Epochs", min_value=10, max_value=200, value=50, step=5, key="heatmap_epochs")
+    threshold = st.slider("Segmentation threshold", min_value=0.30, max_value=0.95, value=0.50, step=0.05, key="heatmap_threshold")
+
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        if st.button("Build Dataset & Train", type="primary", disabled=n_labeled_train == 0):
+            with st.spinner("Building segmentation dataset..."):
+                nt = _build_seg_dataset()
+            st.success(f"Dataset ready — {nt} labeled train heatmap(s)")
+            with st.spinner(f"Training U-Net for {epochs} epochs..."):
+                _run_seg_training(epochs)
+            st.success(f"Training complete — model saved to `{HEATMAP_MODEL_PATH}`")
+            st.rerun()
+
+    with btn_col2:
+        if st.button("Detect on Validation", disabled=not model_exists):
+            with st.spinner("Running segmentation on val heatmaps..."):
+                saved = _run_seg_detection(threshold)
+            st.success(f"Annotated {len(saved)} image(s) → `{HEATMAP_DETECTIONS_DIR}/`")
+            st.rerun()
+
+    # Show saved detection images
+    if HEATMAP_DETECTIONS_DIR.exists():
+        det_images = sorted(HEATMAP_DETECTIONS_DIR.glob("*.png"))
+        if det_images:
+            st.markdown(f"**{len(det_images)} detection result(s):**")
+            grid_cols = st.columns(min(3, len(det_images)))
+            for i, img_path in enumerate(det_images):
+                with grid_cols[i % 3]:
+                    st.image(str(img_path), caption=img_path.name, use_column_width=True)
 
 
 def run_labeling_tab() -> None:

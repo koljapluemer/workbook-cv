@@ -32,6 +32,9 @@ HEATMAP_CHANNEL_R_DIR = Path("data/heatmaps/channel_r")
 HEATMAP_CHANNEL_G_DIR = Path("data/heatmaps/channel_g")
 HEATMAP_CHANNEL_B_DIR = Path("data/heatmaps/channel_b")
 HEATMAP_LABELS_DIR    = Path("data/heatmap_labels")
+HEATMAP_SEG_DIR       = Path("data/heatmap_seg")
+HEATMAP_MODEL_PATH    = Path("data/models/heatmap_detector/weights/best.pt")
+HEATMAP_DETECTIONS_DIR = Path("data/heatmap_detections")
 
 HEATMAP_DEFAULT_KERNEL = 30
 HEATMAP_DEFAULT_HUE    = 220
