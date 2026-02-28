@@ -20,3 +20,6 @@ VALIDATE_DIR = Path("src/img/validate")
 
 # UI Settings
 SETTINGS_FILE = Path("data/settings.json")
+
+# Validation persistence
+VALIDATION_STORE_DIR = Path("data/validation")

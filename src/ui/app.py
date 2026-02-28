@@ -9,9 +9,11 @@ import cv2
 import numpy as np
 import streamlit as st
 
-from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE, VALIDATE_DIR, SETTINGS_FILE
+import datetime
+
+from src.config import TRAIN_DIR, TEMP_DIR, DEFAULT_SENSITIVITY, LABELS_FILE, VALIDATE_DIR, SETTINGS_FILE, VALIDATION_STORE_DIR
 from src.core import load_first_image, get_image_files, AnalysisResult
-from src.core.types import BoundingBox
+from src.core.types import BoundingBox, FeatureRect
 from src.extraction import detect_feature_rectangles, extract_all_features
 from src.analysis import (
     detect_text,
@@ -45,6 +47,155 @@ def save_settings(settings: dict) -> None:
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(SETTINGS_FILE, "w") as f:
         json.dump(settings, f, indent=2)
+
+
+# BGR colors for annotated full images
+_BOX_COLORS = {
+    "label": (255, 100, 0),    # blue-ish
+    "figure": (0, 165, 255),   # orange
+}
+CONFIDENCE_THRESHOLD = 0.70
+
+
+def _draw_prediction_boxes(
+    image_bgr: np.ndarray,
+    results: list[AnalysisResult],
+    predictions: list,
+) -> np.ndarray:
+    """Draw colored boxes for confident label/figure predictions on a full image."""
+    annotated = image_bgr.copy()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    for result, prediction in zip(results, predictions):
+        if prediction.label not in _BOX_COLORS:
+            continue
+        if prediction.confidence < CONFIDENCE_THRESHOLD:
+            continue
+
+        color = _BOX_COLORS[prediction.label]
+        box = result.feature.box
+        cv2.rectangle(annotated, (box.x, box.y), (box.x + box.w, box.y + box.h), color, 3)
+
+        text = f"{prediction.label} {prediction.confidence * 100:.0f}%"
+        (tw, th), _ = cv2.getTextSize(text, font, 0.7, 2)
+        label_y = max(box.y - 6, th + 6)
+        cv2.rectangle(annotated, (box.x, label_y - th - 4), (box.x + tw + 4, label_y + 2), color, -1)
+        cv2.putText(annotated, text, (box.x + 2, label_y), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+    return annotated
+
+
+def save_validation_results(
+    results_by_image: list[tuple[Path, list[AnalysisResult]]],
+    predictions_by_image: list[list],
+    n_labeled_samples: int,
+) -> None:
+    """Persist validation results (images + metadata) to disk.
+
+    Args:
+        results_by_image: List of (source_image_path, analysis_results) per image.
+        predictions_by_image: Corresponding list of prediction lists.
+        n_labeled_samples: Number of labeled samples used to train.
+    """
+    img_dir = VALIDATION_STORE_DIR / "images"
+    overlay_dir = VALIDATION_STORE_DIR / "overlays"
+    hist_dir = VALIDATION_STORE_DIR / "histograms"
+    annotated_dir = VALIDATION_STORE_DIR / "annotated"
+    for d in (img_dir, overlay_dir, hist_dir, annotated_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
+    entries = []
+    for (image_path, results), predictions in zip(results_by_image, predictions_by_image):
+        stem = image_path.stem
+
+        # Save full annotated image
+        full_image = cv2.imread(str(image_path))
+        if full_image is not None:
+            annotated = _draw_prediction_boxes(full_image, results, predictions)
+            cv2.imwrite(str(annotated_dir / f"{stem}.png"), annotated)
+
+        for feature_index, (result, prediction) in enumerate(zip(results, predictions)):
+            key = f"{stem}_{feature_index}"
+            box = result.feature.box
+
+            # Save feature images
+            feat_path = img_dir / f"{key}.png"
+            overlay_path = overlay_dir / f"{key}.png"
+            hist_path = hist_dir / f"{key}.png"
+
+            cv2.imwrite(str(feat_path), cv2.cvtColor(result.feature.image, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(str(overlay_path), cv2.cvtColor(result.ocr_overlay_image, cv2.COLOR_RGB2BGR))
+            cv2.imwrite(str(hist_path), result.histogram_image)
+
+            entries.append({
+                "source_image": image_path.name,
+                "feature_index": feature_index,
+                "box": {"x": box.x, "y": box.y, "w": box.w, "h": box.h},
+                "text_coverage_percent": result.text_coverage_percent,
+                "predicted_label": prediction.label,
+                "confidence": prediction.confidence,
+                "feature_image_path": str(feat_path),
+                "overlay_image_path": str(overlay_path),
+                "histogram_image_path": str(hist_path),
+            })
+
+    metadata = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "n_labeled_samples": n_labeled_samples,
+        "entries": entries,
+    }
+    with open(VALIDATION_STORE_DIR / "results.json", "w") as f:
+        json.dump(metadata, f, indent=2)
+
+
+def load_validation_results() -> tuple[list[AnalysisResult], list] | None:
+    """Load persisted validation results from disk.
+
+    Returns:
+        Tuple of (analysis_results, prediction_results), or None if no saved results.
+    """
+    from src.classifier import PredictionResult
+
+    metadata_path = VALIDATION_STORE_DIR / "results.json"
+    if not metadata_path.exists():
+        return None
+
+    with open(metadata_path) as f:
+        metadata = json.load(f)
+
+    results = []
+    predictions = []
+    for entry in metadata["entries"]:
+        feat_img = cv2.imread(entry["feature_image_path"])
+        overlay_img = cv2.imread(entry["overlay_image_path"])
+        hist_img = cv2.imread(entry["histogram_image_path"])
+
+        if feat_img is None or overlay_img is None or hist_img is None:
+            continue  # skip if images missing from disk
+
+        feat_rgb = cv2.cvtColor(feat_img, cv2.COLOR_BGR2RGB)
+        overlay_rgb = cv2.cvtColor(overlay_img, cv2.COLOR_BGR2RGB)
+
+        b = entry["box"]
+        box = BoundingBox(x=b["x"], y=b["y"], w=b["w"], h=b["h"])
+        feature = FeatureRect(
+            box=box,
+            image=feat_rgb,
+            temp_path=Path(entry["feature_image_path"]),
+        )
+        result = AnalysisResult(
+            feature=feature,
+            ocr_overlay_image=overlay_rgb,
+            text_coverage_percent=entry["text_coverage_percent"],
+            histogram_image=hist_img,
+        )
+        results.append(result)
+        predictions.append(PredictionResult(
+            label=entry["predicted_label"],
+            confidence=entry["confidence"],
+        ))
+
+    return results, predictions
 
 
 def resize_to_max(image: np.ndarray, max_size: int = MAX_FEATURE_SIZE) -> np.ndarray:
@@ -467,9 +618,9 @@ def run_train_and_validate() -> None:
         st.warning(f"No validation images found in {VALIDATE_DIR}")
         return
 
-    # Process each validation image
-    all_results = []
-    all_predictions = []
+    # Process each validation image, keeping results grouped by source image
+    results_by_image = []
+    predictions_by_image = []
 
     progress = st.progress(0)
     for i, image_path in enumerate(validate_files):
@@ -477,19 +628,30 @@ def run_train_and_validate() -> None:
             _, results = run_analysis_pipeline(image_path)
             if results:
                 predictions = predict_features(results, classifier)
-                all_results.extend(results)
-                all_predictions.extend(predictions)
+                results_by_image.append((image_path, results))
+                predictions_by_image.append(predictions)
         progress.progress((i + 1) / len(validate_files))
 
     progress.empty()
 
-    # Store results in session state
+    # Persist to disk
+    save_validation_results(results_by_image, predictions_by_image, classifier.n_samples)
+
+    # Flatten for session state
+    all_results = [r for _, rs in results_by_image for r in rs]
+    all_predictions = [p for ps in predictions_by_image for p in ps]
     st.session_state["validation_results"] = all_results
     st.session_state["validation_predictions"] = all_predictions
 
 
 def run_validation_tab() -> None:
     """Run the validation tab UI."""
+    # Restore from disk if session state is empty
+    if "validation_results" not in st.session_state:
+        loaded = load_validation_results()
+        if loaded is not None:
+            st.session_state["validation_results"], st.session_state["validation_predictions"] = loaded
+
     # Load labels to get count
     labels_data = load_labels(LABELS_FILE)
     n_labeled = len(labels_data.get("labels", []))
