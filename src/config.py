@@ -35,6 +35,7 @@ HEATMAP_LABELS_DIR    = Path("data/heatmap_labels")
 HEATMAP_SEG_DIR       = Path("data/heatmap_seg")
 HEATMAP_MODEL_PATH    = Path("data/models/heatmap_detector/weights/best.pt")
 HEATMAP_DETECTIONS_DIR = Path("data/heatmap_detections")
+FLASHCARD_EXPORT_DIR  = Path("data/flashcard_export")
 
 HEATMAP_DEFAULT_KERNEL = 30
 HEATMAP_DEFAULT_HUE    = 220

@@ -38,7 +38,10 @@ class HeatmapDetector(ABC):
 
     @abstractmethod
     def detect(
-        self, image_path: Path, threshold: float = 0.5
+        self,
+        image_path: Path,
+        threshold: float = 0.5,
+        debug_dir: Path | None = None,
     ) -> list[tuple[int, float, float, float, float]]:
         """Return list of (class_id, x1n, y1n, x2n, y2n) normalized to [0, 1]."""
 
@@ -93,7 +96,7 @@ def mask_to_boxes(
         List of (x1n, y1n, x2n, y2n) in [0, 1].
     """
     h, w = mask.shape
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     closed = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
     n_labels, _, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
     boxes = []

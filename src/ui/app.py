@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from src.config import (
     HEATMAP_OUTPUT_DIR, HEATMAP_RGB_DIR, HEATMAP_LABELS_DIR,
     HEATMAP_SEG_DIR, HEATMAP_MODEL_PATH, HEATMAP_DETECTIONS_DIR,
     HEATMAP_DEFAULT_KERNEL, HEATMAP_DEFAULT_HUE, HEATMAP_DEFAULT_SAT, HEATMAP_DEFAULT_VAL,
+    FLASHCARD_EXPORT_DIR,
 )
 from src.heatmap.detector import SegmentationDetector, HeatmapDetector
 from src.heatmap import process_image as _generate_heatmap
@@ -709,7 +711,93 @@ def _run_seg_detection(threshold: float) -> list[Path]:
         cv2.imwrite(str(out_path), src_img)
         saved_paths.append(out_path)
 
+        class_names = {0: "drawing", 1: "textlabel"}
+        json_data = {
+            "source_image": src_img_path.name,
+            "boxes": [
+                {
+                    "class_id": cls_id,
+                    "class_name": class_names.get(cls_id, str(cls_id)),
+                    "x1n": x1n, "y1n": y1n, "x2n": x2n, "y2n": y2n,
+                }
+                for cls_id, x1n, y1n, x2n, y2n in boxes
+            ],
+        }
+        json_path = HEATMAP_DETECTIONS_DIR / (source_stem + ".json")
+        with open(json_path, "w") as f:
+            json.dump(json_data, f, indent=2)
+
     return saved_paths
+
+
+def _export_flashcards() -> int:
+    """Crop drawing/textlabel pairs from source images and save as numbered files.
+
+    Returns total number of pairs exported.
+    """
+    FLASHCARD_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+    pair_idx = 0
+    for json_path in sorted(HEATMAP_DETECTIONS_DIR.glob("*.json")):
+        with open(json_path) as f:
+            data = json.load(f)
+
+        src_img_path = None
+        for ext in (".png", ".jpg", ".jpeg"):
+            candidate = VALIDATE_DIR / Path(data["source_image"]).with_suffix(ext).name
+            if candidate.exists():
+                src_img_path = candidate
+                break
+        if src_img_path is None:
+            continue
+
+        src_img = cv2.imread(str(src_img_path))
+        if src_img is None:
+            continue
+        h, w = src_img.shape[:2]
+
+        drawings = [b for b in data["boxes"] if b["class_name"] == "drawing"]
+        textlabels = [b for b in data["boxes"] if b["class_name"] == "textlabel"]
+
+        if not textlabels:
+            continue
+
+        def to_px(b):
+            return (
+                int(b["x1n"] * w), int(b["y1n"] * h),
+                int(b["x2n"] * w), int(b["y2n"] * h),
+            )
+
+        lbl_px = [to_px(b) for b in textlabels]
+
+        for draw_box in drawings:
+            draw_x1, draw_y1, draw_x2, draw_y2 = to_px(draw_box)
+
+            best_dist = float("inf")
+            best_lbl = None
+            for lx1, ly1, lx2, ly2 in lbl_px:
+                dx = max(draw_x1 - lx2, lx1 - draw_x2, 0)
+                dy = max(draw_y1 - ly2, ly1 - draw_y2, 0)
+                dist = math.sqrt(dx * dx + dy * dy)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_lbl = (lx1, ly1, lx2, ly2)
+
+            if best_lbl is None:
+                continue
+
+            draw_crop = src_img[draw_y1:draw_y2, draw_x1:draw_x2]
+            lx1, ly1, lx2, ly2 = best_lbl
+            lbl_crop = src_img[ly1:ly2, lx1:lx2]
+
+            if draw_crop.size == 0 or lbl_crop.size == 0:
+                continue
+
+            cv2.imwrite(str(FLASHCARD_EXPORT_DIR / f"{pair_idx:02d}_drawing.png"), draw_crop)
+            cv2.imwrite(str(FLASHCARD_EXPORT_DIR / f"{pair_idx:02d}_textlabel.png"), lbl_crop)
+            pair_idx += 1
+
+    return pair_idx
 
 
 def run_heatmaps_tab() -> None:
@@ -895,6 +983,24 @@ def run_heatmaps_tab() -> None:
             for i, img_path in enumerate(det_images):
                 with grid_cols[i % 3]:
                     st.image(str(img_path), caption=img_path.name, use_column_width=True)
+
+    st.divider()
+    st.subheader("Export Flashcards")
+
+    detections_exist = bool(list(HEATMAP_DETECTIONS_DIR.glob("*.json"))) \
+        if HEATMAP_DETECTIONS_DIR.exists() else False
+    n_exported = len(list(FLASHCARD_EXPORT_DIR.glob("*_drawing.png"))) \
+        if FLASHCARD_EXPORT_DIR.exists() else 0
+
+    exp_cols = st.columns(2)
+    exp_cols[0].metric("Detection JSONs available", sum(1 for _ in HEATMAP_DETECTIONS_DIR.glob("*.json")) if HEATMAP_DETECTIONS_DIR.exists() else 0)
+    exp_cols[1].metric("Pairs exported", n_exported)
+
+    if st.button("Export Flashcard Pairs", disabled=not detections_exist):
+        with st.spinner("Exporting flashcard pairs..."):
+            n = _export_flashcards()
+        st.success(f"Exported {n} pair(s) → `{FLASHCARD_EXPORT_DIR}/`")
+        st.rerun()
 
 
 def run_labeling_tab() -> None:
