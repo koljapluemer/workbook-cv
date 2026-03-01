@@ -770,25 +770,34 @@ def _export_flashcards() -> int:
 
         lbl_px = [to_px(b) for b in textlabels]
 
+        # First pass: assign each drawing its nearest textlabel index
+        assignments: list[tuple[tuple, int]] = []  # (draw_px, lbl_idx)
         for draw_box in drawings:
-            draw_x1, draw_y1, draw_x2, draw_y2 = to_px(draw_box)
-
+            draw_px = to_px(draw_box)
+            draw_x1, draw_y1, draw_x2, draw_y2 = draw_px
             best_dist = float("inf")
-            best_lbl = None
-            for lx1, ly1, lx2, ly2 in lbl_px:
+            best_idx = -1
+            for i, (lx1, ly1, lx2, ly2) in enumerate(lbl_px):
                 dx = max(draw_x1 - lx2, lx1 - draw_x2, 0)
                 dy = max(draw_y1 - ly2, ly1 - draw_y2, 0)
                 dist = math.sqrt(dx * dx + dy * dy)
                 if dist < best_dist:
                     best_dist = dist
-                    best_lbl = (lx1, ly1, lx2, ly2)
+                    best_idx = i
+            if best_idx >= 0:
+                assignments.append((draw_px, best_idx))
 
-            if best_lbl is None:
-                continue
+        # Disqualify any textlabel claimed by more than one drawing
+        from collections import Counter
+        lbl_claim_counts = Counter(lbl_idx for _, lbl_idx in assignments)
+        unambiguous = [(draw_px, lbl_idx) for draw_px, lbl_idx in assignments if lbl_claim_counts[lbl_idx] == 1]
+
+        for draw_px, lbl_idx in unambiguous:
+            draw_x1, draw_y1, draw_x2, draw_y2 = draw_px
+            lx1, ly1, lx2, ly2 = lbl_px[lbl_idx]
 
             draw_crop = src_img[draw_y1:draw_y2, draw_x1:draw_x2]
-            lx1, ly1, lx2, ly2 = best_lbl
-            lbl_crop = src_img[ly1:ly2, lx1:lx2]
+            lbl_crop  = src_img[ly1:ly2, lx1:lx2]
 
             if draw_crop.size == 0 or lbl_crop.size == 0:
                 continue
