@@ -613,15 +613,16 @@ def canvas_to_boxes(
     return labels
 
 
-def _heatmap_split(stem: str) -> str:
-    """Return 'train', 'val', or 'unknown' based on source image stem."""
-    # Strip _k{N} suffix e.g. "page_23_k40" → "page_23"
+def _heatmap_split(stem: str) -> set[str]:
+    """Return the set of splits ('train', 'val') the source image belongs to."""
     source_stem = re.sub(r"_k\d+$", "", stem)
-    if (TRAIN_DIR / (source_stem + ".png")).exists() or (TRAIN_DIR / (source_stem + ".jpg")).exists():
-        return "train"
-    if (VALIDATE_DIR / (source_stem + ".png")).exists() or (VALIDATE_DIR / (source_stem + ".jpg")).exists():
-        return "val"
-    return "unknown"
+    splits = set()
+    for ext in (".png", ".jpg"):
+        if (TRAIN_DIR / (source_stem + ext)).exists():
+            splits.add("train")
+        if (VALIDATE_DIR / (source_stem + ext)).exists():
+            splits.add("val")
+    return splits
 
 
 def _build_seg_dataset() -> int:
@@ -640,7 +641,7 @@ def _build_seg_dataset() -> int:
     for label_path in HEATMAP_LABELS_DIR.glob("*.txt"):
         if label_path.stat().st_size == 0:
             continue
-        if _heatmap_split(label_path.stem) != "train":
+        if "train" not in _heatmap_split(label_path.stem):
             continue
         img_src = HEATMAP_RGB_DIR / (label_path.stem + ".png")
         if not img_src.exists():
@@ -673,7 +674,7 @@ def _run_seg_detection(threshold: float) -> list[Path]:
     detector = SegmentationDetector.load(HEATMAP_MODEL_PATH)
     val_heatmaps = [
         p for p in HEATMAP_RGB_DIR.glob("*.png")
-        if _heatmap_split(p.stem) == "val"
+        if "val" in _heatmap_split(p.stem)
     ]
 
     HEATMAP_DETECTIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -874,13 +875,13 @@ def run_heatmaps_tab() -> None:
     heatmap_files = sorted(
         p for p in HEATMAP_RGB_DIR.iterdir()
         if p.suffix.lower() in {".png", ".jpg", ".jpeg"}
-        and _heatmap_split(p.stem) == "train"
+        and "train" in _heatmap_split(p.stem)
     )
 
     HEATMAP_LABELS_DIR.mkdir(parents=True, exist_ok=True)
     n_labeled = sum(
         1 for f in HEATMAP_LABELS_DIR.glob("*.txt")
-        if f.stat().st_size > 0 and _heatmap_split(f.stem) == "train"
+        if f.stat().st_size > 0 and "train" in _heatmap_split(f.stem)
     )
 
     col_ctrl, col_canvas = st.columns([1, 4])
@@ -894,7 +895,7 @@ def run_heatmaps_tab() -> None:
         label_path   = HEATMAP_LABELS_DIR / (heatmap_path.stem + ".txt")
 
         split = _heatmap_split(heatmap_path.stem)
-        st.caption(f"Split: **{split}**")
+        st.caption(f"Split: **{', '.join(sorted(split)) or 'unknown'}**")
 
         class_name = st.radio(
             "Draw class",
@@ -949,11 +950,11 @@ def run_heatmaps_tab() -> None:
     # Count human-labeled train heatmaps (val images are never labeled by humans)
     n_labeled_train = sum(
         1 for f in HEATMAP_LABELS_DIR.glob("*.txt")
-        if f.stat().st_size > 0 and _heatmap_split(f.stem) == "train"
+        if f.stat().st_size > 0 and "train" in _heatmap_split(f.stem)
     )
     n_val_heatmaps = sum(
         1 for p in HEATMAP_RGB_DIR.glob("*.png")
-        if _heatmap_split(p.stem) == "val"
+        if "val" in _heatmap_split(p.stem)
     ) if HEATMAP_RGB_DIR.exists() else 0
     model_exists = HEATMAP_MODEL_PATH.exists()
 
